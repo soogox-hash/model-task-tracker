@@ -1,0 +1,10 @@
+{
+  "name": "model-task-recorder",
+  "productName": "模型任务记录系统",
+  "version": "1.0.0",
+  "description": "影视后期模型师任务记录系统（单机版）",
+  "main": "main.js",
+  "author": "artvom",
+  "license": "UNLICENSED",
+  "private": true
+}
