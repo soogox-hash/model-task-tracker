@@ -45,7 +45,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.1.8"           # 用于确认当前加载的是哪份脚本
+VERSION = "1.1.9"           # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -1737,7 +1737,7 @@ def _set_progress(percent, elapsed):
 
 
 def _fit_window():
-    """把窗口高度收紧到内容实际需要的高度，去掉底部空白。"""
+    """把窗口尺寸锁定为内容尺寸，去掉底部空白。"""
     try:
         from maya import OpenMayaUI as omui
         from shiboken6 import wrapInstance
@@ -1754,6 +1754,10 @@ def _fit_window():
         if not pointer:
             return
         window = wrapInstance(int(pointer), QtWidgets.QWidget)
+        layout = window.layout()
+        if layout is not None:
+            layout.setSizeConstraint(QtWidgets.QLayout.SetFixedSize)
+            layout.activate()
         window.adjustSize()
     except Exception:
         pass
@@ -2134,6 +2138,11 @@ def show_ui(*_args):
     if cmds.window(_WINDOW, exists=True):
         _stop_frame_follow()
         cmds.deleteUI(_WINDOW)
+    # Maya 会把窗口尺寸存进 windowPref，旧尺寸会盖过内容高度，先清掉。
+    try:
+        cmds.windowPref(_WINDOW, remove=True)
+    except Exception:
+        pass
 
     cmds.window(_WINDOW, title="镜头内物体检测", width=380,
                 resizeToFitChildren=True, sizeable=False,
