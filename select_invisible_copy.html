@@ -1,0 +1,1722 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>select_invisible.py</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161a20;
+    --border: #262c36;
+    --text: #d7dce3;
+    --muted: #8b95a3;
+    --accent: #4f8cff;
+    --ok: #37c47f;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    min-height: 100vh;
+  }
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 12px 18px;
+    background: rgba(22, 26, 32, .92);
+    border-bottom: 1px solid var(--border);
+    backdrop-filter: blur(8px);
+  }
+  .title { font-size: 14px; font-weight: 600; letter-spacing: .2px; }
+  .meta { font-size: 12px; color: var(--muted); }
+  .spacer { flex: 1; }
+  button {
+    font: inherit;
+    font-size: 13px;
+    color: #fff;
+    background: var(--accent);
+    border: 0;
+    border-radius: 6px;
+    padding: 7px 16px;
+    cursor: pointer;
+    transition: filter .15s, background .15s;
+  }
+  button:hover { filter: brightness(1.1); }
+  button:active { filter: brightness(.92); }
+  button.ghost {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+  button.ghost:hover { background: #1d222a; filter: none; }
+  button.done { background: var(--ok); }
+  main { padding: 0 0 60px; }
+  pre {
+    margin: 0;
+    padding: 18px 22px;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace;
+    font-size: 12.5px;
+    line-height: 1.65;
+    tab-size: 4;
+    white-space: pre;
+    overflow-x: auto;
+    color: #cfd6e0;
+  }
+  code { font-family: inherit; }
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: 32px;
+    transform: translate(-50%, 12px);
+    background: #1f2530;
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 13px;
+    padding: 9px 18px;
+    border-radius: 999px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .18s, transform .18s;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .toast.fail { border-color: #a33; color: #ffb4b4; }
+</style>
+</head>
+<body>
+<header>
+  <span class="title">select_invisible.py</span>
+  <span class="meta">1545 行 · 56.1 KB · Maya 2020+ / Python 3</span>
+  <span class="spacer"></span>
+  <button id="copy">复制代码</button>
+  <button id="download" class="ghost">下载 .py</button>
+</header>
+<main>
+<pre><code id="code"># -*- coding: utf-8 -*-
+"""
+选出在指定镜头和帧范围内始终不可见的网格物体（Maya 2020+，Python 3）。
+
+用法
+----
+运行脚本打开检测面板，点击「开始」后才统计场景中的镜头、模型、帧数，
+并执行判定。也可以直接调用 select_invisible() 走脚本编辑器流程。
+
+选择规则
+--------
+* 选中镜头：只检查这些镜头；未选中镜头：检查场景镜头。
+* 选中网格/组：只检查其下的网格；只选镜头时仍检查全部网格。
+* 可同时选中镜头和目标物体，两种选择互不冲突。
+
+帧规则
+------
+* FRAMES 非空时优先使用显式帧列表，支持子帧。
+* 否则检查 FRAME_START 至 FRAME_END（包含首尾），步长为 FRAME_STEP。
+* FRAME_START/END 为 None 时使用播放范围；默认逐整帧检查，不再只查三帧。
+
+判定规则
+--------
+* 每一帧重新计算镜头矩阵、视锥、物体几何和可见遮挡体。
+* 包围盒仅用于保守剔除，不作为“可见”的证据。
+* 顶点采样走快路径；采样未命中时，对表面三角形做完整视锥裁剪。
+* 遮挡射线只射向位于当前视锥内的真实表面采样点。
+* 任何几何/API 错误都会把物体列为“无法判定”，不会当作不可见选中。
+
+PIXEL_EXACT 保留原参数名，但实际是“视口 ID-Buffer 模式”：逐像素检查
+视口结果，并不等同于最终渲染器的严格可见性。无法关闭抗锯齿/色彩管理、
+目标过多或需要独立排除透明遮挡体时，会安全退回采样模式。
+"""
+import math
+import os
+import tempfile
+import time
+from array import array
+
+import maya.cmds as cmds
+import maya.api.OpenMaya as om
+
+# ---------------- 可调参数 ----------------
+MARGIN = 1.15               # 视锥放宽系数；&gt;=1 更保守
+FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
+FRAME_START = None          # 帧范围起点；None = 播放范围起点
+FRAME_END = None            # 帧范围终点；None = 播放范围终点
+FRAME_STEP = 1.0            # 帧步长；检查子帧可设为 0.5、0.25 等
+ONLY_RENDERABLE = False     # 只统计可渲染镜头
+FRUSTUM_SAMPLES = 96        # 视锥快路径的顶点采样上限
+SAMPLES_PER_OBJ = 64        # 每镜头遮挡判定的表面采样上限
+EXACT_FRUSTUM = True        # 快路径未命中时执行三角形/视锥精确裁剪
+OCCLUSION = True            # 是否做遮挡判定
+PIXEL_EXACT = False         # 视口 ID-Buffer；需要 Maya GUI
+EXCLUDE_OCCLUDERS = ()      # 采样模式下不算遮挡体的物体名前缀
+RAY_EPSILON = 0.01          # 遮挡射线端点容差（场景单位）
+PIXEL_TOLERANCE = 1         # ID 缓冲每通道允许的 8-bit 误差
+EXACT_TRIANGLE_BUDGET = 200000  # 单物体精确视锥裁剪的三角形上限
+PROGRESS_EVERY = 50         # 每处理多少个物体打印一次进度
+MAX_MESH_VERTICES = 300000  # 单个网格顶点上限，超过则跳过精确采样
+MAX_MESH_TRIANGLES = 300000  # 单个网格三角上限
+MAX_GEOMETRY_VERTICES = 800000  # 单个物体的几何顶点总预算
+MAX_GEOMETRY_TRIANGLES = 800000  # 单个物体的三角总预算
+TRACE_LOG = True            # 写入逐物体轨迹日志，崩溃后可定位到具体物体
+
+_ID_LEVELS = 43             # 43^3 个颜色；0 和末号保留，其余分配给目标
+_DEFAULT_CAMERAS = ("perspShape", "frontShape", "sideShape", "topShape")
+_DRAW_TYPES = ("mesh", "nurbsSurface", "subdiv", "gpuCache")
+_DRAW_ATTRS = (
+    "overrideEnabled",
+    "overrideRGBColors",
+    "overrideColorRGB",
+    "overrideShading",
+    "overrideTexturing",
+    "overrideVisibility",
+)
+
+
+class _PixelUnavailable(Exception):
+    pass
+
+
+def _short(node):
+    return node.rsplit("|", 1)[-1]
+
+
+def _is_default_camera(shape):
+    """只排除 Maya 自带的那四个相机（persp/front/side/top）。
+
+    带编号的相机（persp1、persp2、perspShape1 等）都是用户新建的，
+    必须参与判定，不能一并排除。
+    """
+    return _short(shape) in _DEFAULT_CAMERAS
+
+
+def _to_dag_path(obj):
+    sel = om.MSelectionList()
+    sel.add(obj)
+    return sel.getDagPath(0)
+
+
+def _parent_transform(shape):
+    parents = cmds.listRelatives(shape, parent=True, fullPath=True) or []
+    if not parents:
+        raise RuntimeError("形状节点没有父变换：" + shape)
+    return parents[0]
+
+
+def _mesh_shapes(transform):
+    shapes = cmds.listRelatives(
+        transform, shapes=True, fullPath=True, type="mesh") or []
+    return [s for s in shapes if not cmds.getAttr(s + ".intermediateObject")]
+
+
+def _all_shapes(node_type):
+    shapes = cmds.ls(type=node_type, long=True, allPaths=True) or []
+    if node_type == "mesh":
+        shapes = [s for s in shapes
+                  if not cmds.getAttr(s + ".intermediateObject")]
+    return shapes
+
+
+def _is_camera_node(node):
+    if cmds.nodeType(node) == "camera":
+        return True
+    return bool(cmds.listRelatives(
+        node, shapes=True, fullPath=True, type="camera") or [])
+
+
+def _cameras(selection):
+    selected = []
+    for node in selection:
+        if cmds.nodeType(node) == "camera":
+            selected.append(node)
+        else:
+            selected.extend(cmds.listRelatives(
+                node, shapes=True, fullPath=True, type="camera") or [])
+
+    candidates = selected or _all_shapes("camera")
+    result = []
+    for shape in dict.fromkeys(candidates):
+        if _is_default_camera(shape):
+            continue
+        if ONLY_RENDERABLE and not cmds.camera(
+                shape, query=True, renderable=True):
+            continue
+        result.append(shape)
+    return result
+
+
+def _target_transforms(selection):
+    roots = []
+    for node in selection:
+        if _is_camera_node(node):
+            continue
+        if cmds.nodeType(node) == "mesh":
+            if not cmds.getAttr(node + ".intermediateObject"):
+                roots.append(node)
+        elif cmds.objectType(node, isAType="transform"):
+            roots.append(node)
+
+    targets = set()
+    if roots:
+        for root in roots:
+            if cmds.nodeType(root) == "mesh":
+                shapes = [root]
+            else:
+                shapes = cmds.listRelatives(
+                    root, allDescendents=True, fullPath=True,
+                    type="mesh") or []
+            for shape in shapes:
+                if not cmds.getAttr(shape + ".intermediateObject"):
+                    targets.add(_parent_transform(shape))
+    else:
+        for shape in _all_shapes("mesh"):
+            targets.add(_parent_transform(shape))
+    return sorted(targets)
+
+
+def _sample_frames(start=None, end=None, step=None, frames=None):
+    if frames is None:
+        frames = FRAMES
+    if frames:
+        values = sorted(set(float(f) for f in frames))
+        if not values:
+            raise ValueError("FRAMES 不能为空列表以外的空帧集合")
+        return values
+
+    start = FRAME_START if start is None else start
+    end = FRAME_END if end is None else end
+    start = (cmds.playbackOptions(query=True, minTime=True)
+             if start is None else float(start))
+    end = (cmds.playbackOptions(query=True, maxTime=True)
+           if end is None else float(end))
+    step = float(FRAME_STEP if step is None else step)
+    start, end = float(start), float(end)
+    if step &lt;= 0:
+        raise ValueError("FRAME_STEP 必须大于 0")
+    if end &lt; start:
+        raise ValueError("FRAME_END 不能小于 FRAME_START")
+
+    count = int(math.floor((end - start) / step + 1e-9))
+    frames = [start + i * step for i in range(count + 1)]
+    if not frames or abs(frames[-1] - end) &gt; 1e-9:
+        frames.append(end)  # 范围内始终包含结束帧
+    return frames
+
+
+def _validate_options(targets):
+    if MARGIN &lt;= 0:
+        raise ValueError("MARGIN 必须大于 0")
+    if FRUSTUM_SAMPLES &lt; 1 or SAMPLES_PER_OBJ &lt; 1:
+        raise ValueError("采样数必须大于等于 1")
+    if PIXEL_EXACT and len(targets) &gt; _ID_LEVELS ** 3 - 2:
+        raise ValueError("目标过多，ID-Buffer 无法分配唯一颜色")
+
+
+def _display_layers(shape, transform):
+    layers = []
+    for node in (shape, transform):
+        layers.extend(cmds.listConnections(
+            node, source=True, destination=False,
+            type="displayLayer") or [])
+    return set(layers)
+
+
+def _visible_to_camera(shape):
+    """当前帧的基础相机可见性；不判断视锥和遮挡。"""
+    if cmds.objExists(shape + ".intermediateObject") and cmds.getAttr(
+            shape + ".intermediateObject"):
+        return False
+    transform = _parent_transform(shape)
+    hierarchy = [shape, transform]
+    hierarchy.extend(cmds.listRelatives(
+        transform, allParents=True, fullPath=True) or [])
+    for node in hierarchy:
+        if cmds.objExists(node + ".visibility") and not cmds.getAttr(
+                node + ".visibility"):
+            return False
+        if (cmds.objExists(node + ".overrideEnabled")
+                and cmds.getAttr(node + ".overrideEnabled")
+                and cmds.objExists(node + ".overrideVisibility")
+                and not cmds.getAttr(node + ".overrideVisibility")):
+            return False
+    if cmds.objExists(shape + ".primaryVisibility") and not cmds.getAttr(
+            shape + ".primaryVisibility"):
+        return False
+    for layer in _display_layers(shape, transform):
+        if cmds.objExists(layer + ".visibility") and not cmds.getAttr(
+                layer + ".visibility"):
+            return False
+    return True
+
+
+def _target_visible(target):
+    return any(_visible_to_camera(s) for s in _mesh_shapes(target))
+
+
+# ---------------- 每帧镜头视锥 ----------------
+def _cam_frustum(cam_shape):
+    dag = _to_dag_path(cam_shape)
+    fn = om.MFnCamera(dag)
+    matrix = dag.inclusiveMatrix()
+    near = float(fn.nearClippingPlane)
+    far = float(fn.farClippingPlane)
+    width = float(cmds.getAttr("defaultResolution.width"))
+    height = float(cmds.getAttr("defaultResolution.height"))
+    pixel_aspect = 1.0
+    if cmds.objExists("defaultResolution.pixelAspect"):
+        pixel_aspect = float(cmds.getAttr("defaultResolution.pixelAspect"))
+    if width &lt;= 0 or height &lt;= 0 or pixel_aspect &lt;= 0:
+        raise RuntimeError("渲染分辨率或像素宽高比无效")
+    # getFilmFrustum 返回尺寸/偏移，并非左右上下边界；渲染视锥才直接
+    # 返回 (left, right, bottom, top)，且会处理 film fit 和画面宽高比。
+    left, right, bottom, top = fn.getRenderingFrustum(
+        width * pixel_aspect / height)
+    left, right = float(left), float(right)
+    bottom, top = float(bottom), float(top)
+    if near &lt;= 0 or far &lt; near:
+        raise RuntimeError("镜头裁剪面无效：" + cam_shape)
+
+    cx, cy = (left + right) * 0.5, (bottom + top) * 0.5
+    hx = (right - left) * 0.5 * MARGIN
+    hy = (top - bottom) * 0.5 * MARGIN
+    left, right = cx - hx, cx + hx
+    bottom, top = cy - hy, cy + hy
+    ortho = bool(cmds.camera(cam_shape, query=True, orthographic=True))
+    if not ortho:
+        left, right = left / near, right / near
+        bottom, top = bottom / near, top / near
+
+    translation = om.MTransformationMatrix(matrix).translation(om.MSpace.kWorld)
+    direction = om.MVector(0, 0, -1) * matrix
+    direction.normalize()
+    return {
+        "matrix": matrix,
+        "inverse": matrix.inverse(),
+        "left": left,
+        "right": right,
+        "bottom": bottom,
+        "top": top,
+        "near": near,
+        "far": far,
+        "ortho": ortho,
+        "eye": om.MPoint(translation.x, translation.y, translation.z),
+        "direction": direction,
+        "name": cam_shape,
+    }
+
+
+def _camera_point(point, frustum):
+    p = point * frustum["inverse"]
+    return p.x, p.y, -p.z
+
+
+def _world_point(camera_point, frustum):
+    p = om.MPoint(camera_point[0], camera_point[1], -camera_point[2])
+    return p * frustum["matrix"]
+
+
+def _plane_distance(point, plane, frustum):
+    x, y, z = point
+    if plane == 0:
+        return z - frustum["near"]
+    if plane == 1:
+        return frustum["far"] - z
+    if plane == 2:
+        return x - (frustum["left"] if frustum["ortho"]
+                    else frustum["left"] * z)
+    if plane == 3:
+        return ((frustum["right"] if frustum["ortho"]
+                 else frustum["right"] * z) - x)
+    if plane == 4:
+        return y - (frustum["bottom"] if frustum["ortho"]
+                    else frustum["bottom"] * z)
+    return ((frustum["top"] if frustum["ortho"]
+             else frustum["top"] * z) - y)
+
+
+def _camera_point_inside(point, frustum, epsilon=1e-7):
+    return all(_plane_distance(point, plane, frustum) &gt;= -epsilon
+               for plane in range(6))
+
+
+def _point_in_frustum(point, frustum):
+    return _camera_point_inside(_camera_point(point, frustum), frustum)
+
+
+def _clip_triangle(triangle, frustum):
+    """Sutherland-Hodgman：返回三角形位于视锥内的表面片顶点。"""
+    polygon = list(triangle)
+    epsilon = 1e-9
+    for plane in range(6):
+        if not polygon:
+            return []
+        clipped = []
+        previous = polygon[-1]
+        d_previous = _plane_distance(previous, plane, frustum)
+        previous_inside = d_previous &gt;= -epsilon
+        for current in polygon:
+            d_current = _plane_distance(current, plane, frustum)
+            current_inside = d_current &gt;= -epsilon
+            if current_inside != previous_inside:
+                denominator = d_previous - d_current
+                if abs(denominator) &gt; 1e-15:
+                    t = d_previous / denominator
+                    intersection = tuple(
+                        previous[i] + (current[i] - previous[i]) * t
+                        for i in range(3))
+                    clipped.append(intersection)
+            if current_inside:
+                clipped.append(current)
+            previous = current
+            d_previous = d_current
+            previous_inside = current_inside
+        polygon = clipped
+    return polygon
+
+
+def _bounds(node):
+    """世界空间包围盒；对象无效或无包围盒时返回 None，不抛错。"""
+    if not node or not cmds.objExists(node):
+        return None
+    try:
+        bb = cmds.exactWorldBoundingBox(node)
+    except Exception:
+        return None
+    if not bb or len(bb) != 6:
+        return None
+    return tuple(float(v) for v in bb)
+
+
+def _bbox_points(obj):
+    bb = _bounds(obj)
+    if bb is None:
+        return []
+    x0, y0, z0, x1, y1, z1 = bb
+    return [om.MPoint(x, y, z)
+            for x in (x0, x1) for y in (y0, y1) for z in (z0, z1)]
+
+
+def _bbox_definitely_outside(points, frustum):
+    """只有所有角点位于同一视锥平面外侧时才剔除，不做可见判定。"""
+    if not points:
+        return False
+    camera_points = [_camera_point(p, frustum) for p in points]
+    for plane in range(6):
+        if all(_plane_distance(p, plane, frustum) &lt; -1e-7
+               for p in camera_points):
+            return True
+    return False
+
+
+# ---------------- 当前帧表面几何 ----------------
+_TRACE_HANDLE = None
+
+
+def _trace_start():
+    global _TRACE_HANDLE
+    if not TRACE_LOG:
+        return
+    try:
+        path = os.path.join(tempfile.gettempdir(),
+                            "invisible_scan_trace.log")
+        _TRACE_HANDLE = open(path, "w", buffering=1)
+        print("逐物体轨迹日志：%s" % path)
+    except Exception:
+        _TRACE_HANDLE = None
+
+
+def _trace(message):
+    if _TRACE_HANDLE is None:
+        return
+    try:
+        _TRACE_HANDLE.write(message + "\n")
+    except Exception:
+        pass
+
+
+def _trace_stop():
+    global _TRACE_HANDLE
+    if _TRACE_HANDLE is not None:
+        try:
+            _TRACE_HANDLE.close()
+        except Exception:
+            pass
+        _TRACE_HANDLE = None
+
+
+def _target_geometry(target):
+    """读取当前帧几何；由调用方用完即释放，避免缓存全部物体撑爆内存。
+
+    超大网格直接返回 None：继续读取可能瞬间耗尽内存并让 Maya 崩溃，
+    调用方会把这类物体按“无法确认、保留”处理。
+    """
+    geometry = []
+    total_vertices = 0
+    total_triangles = 0
+    for shape in _mesh_shapes(target):
+        fn = om.MFnMesh(_to_dag_path(shape))
+        vertex_count = fn.numVertices
+        if vertex_count == 0 or fn.numPolygons == 0:
+            continue
+        if (vertex_count &gt; MAX_MESH_VERTICES
+                or fn.numPolygons &gt; MAX_MESH_TRIANGLES):
+            return None
+        total_vertices += vertex_count
+        if total_vertices &gt; MAX_GEOMETRY_VERTICES:
+            return None
+        vertices = list(fn.getPoints(om.MSpace.kWorld))
+        _counts, indices = fn.getTriangles()
+        total_triangles += len(indices) // 3
+        if total_triangles &gt; MAX_GEOMETRY_TRIANGLES:
+            return None
+        indices = array("i", indices)  # 每索引 4 字节，避免 Python int 列表爆内存
+        if len(indices) % 3:
+            raise RuntimeError("三角索引损坏：" + shape)
+        geometry.append((vertices, indices))
+    return geometry
+
+
+def _uniform_indices(count, limit):
+    if count &lt;= 0 or limit &lt;= 0:
+        return []
+    if count &lt;= limit:
+        return list(range(count))
+    if limit == 1:
+        return [count // 2]
+    # 包含首尾，避免原切片方式遗漏末尾及产生前段偏置。
+    return [(i * (count - 1)) // (limit - 1) for i in range(limit)]
+
+
+def _vertex_samples(geometry, limit):
+    total = sum(len(vertices) for vertices, _indices in geometry)
+    result = []
+    for index in _uniform_indices(total, limit):
+        for vertices, _indices in geometry:
+            if index &lt; len(vertices):
+                result.append(vertices[index])
+                break
+            index -= len(vertices)
+    return result
+
+
+def _centroid_samples(geometry, limit):
+    total = sum(len(indices) // 3 for _vertices, indices in geometry)
+    result = []
+    for index in _uniform_indices(total, limit):
+        for vertices, indices in geometry:
+            count = len(indices) // 3
+            if index &lt; count:
+                base = index * 3
+                a, b, c = (vertices[indices[base]],
+                           vertices[indices[base + 1]],
+                           vertices[indices[base + 2]])
+                result.append(om.MPoint(
+                    (a.x + b.x + c.x) / 3.0,
+                    (a.y + b.y + c.y) / 3.0,
+                    (a.z + b.z + c.z) / 3.0))
+                break
+            index -= count
+    return result
+
+
+def _frustum_evidence(bbox, geometry, frustum, limit):
+    """返回 (视锥内真实表面点, 是否因预算不足无法确认)。"""
+    if not any(indices for _vertices, indices in geometry):
+        return [], False
+    if _bbox_definitely_outside(bbox, frustum):
+        return [], False
+
+    evidence = [p for p in _vertex_samples(geometry, FRUSTUM_SAMPLES)
+                if _point_in_frustum(p, frustum)]
+    if evidence or not EXACT_FRUSTUM:
+        return evidence[:limit], False
+
+    # 顶点都在外部不代表表面在外部：逐个三角形裁剪，覆盖大面片、
+    # 镜头位于物体内部、视锥仅切到一条边等情况。超出预算时按“可能
+    # 可见”处理，宁可保留物体，也不误选可见物体。
+    budget = EXACT_TRIANGLE_BUDGET
+    for vertices, indices in geometry:
+        camera_vertices = [_camera_point(p, frustum) for p in vertices]
+        for base in range(0, len(indices) - 2, 3):
+            if budget &lt;= 0:
+                return [], True
+            budget -= 1
+            clipped = _clip_triangle(
+                [camera_vertices[indices[base + i]] for i in range(3)],
+                frustum)
+            for point in clipped:
+                evidence.append(_world_point(point, frustum))
+                if len(evidence) &gt;= limit:
+                    return evidence, False
+    return evidence, False
+
+
+# ---------------- 遮挡 ----------------
+def _world_bounds(node):
+    return _bounds(node)
+
+
+def _segment_hits_bounds(source, destination, bounds, pad):
+    """世界空间线段与 AABB 快速相交测试，用来剔除无关遮挡体。"""
+    if bounds is None:
+        return True
+    src = (source.x, source.y, source.z)
+    vector = (destination.x - src[0], destination.y - src[1],
+              destination.z - src[2])
+    low = (bounds[0] - pad, bounds[1] - pad, bounds[2] - pad)
+    high = (bounds[3] + pad, bounds[4] + pad, bounds[5] + pad)
+    enter, leave = 0.0, 1.0
+    for axis in range(3):
+        if abs(vector[axis]) &lt; 1e-12:
+            if src[axis] &lt; low[axis] or src[axis] &gt; high[axis]:
+                return False
+            continue
+        first = (low[axis] - src[axis]) / vector[axis]
+        second = (high[axis] - src[axis]) / vector[axis]
+        if first &gt; second:
+            first, second = second, first
+        enter = max(enter, first)
+        leave = min(leave, second)
+        if enter &gt; leave:
+            return False
+    return True
+
+
+def _build_occluders():
+    result = []
+    for shape in _all_shapes("mesh"):
+        try:
+            transform = _parent_transform(shape)
+            if any(_short(transform).startswith(prefix)
+                   for prefix in EXCLUDE_OCCLUDERS):
+                continue
+            if not _visible_to_camera(shape):
+                continue
+            result.append((om.MFnMesh(_to_dag_path(shape)), shape, transform,
+                           _world_bounds(shape)))
+        except Exception:
+            continue  # 单个异常网格不影响整体判定
+    return result
+
+
+class _OccluderIndex(object):
+    """均匀网格：沿射线只取穿过格子里的遮挡体，避免遍历全场景。"""
+
+    def __init__(self, occluders, resolution=48):
+        self.items = [o for o in occluders if o[3] is not None]
+        self.cells = {}
+        self.origin = (0.0, 0.0, 0.0)
+        self.cell = 1.0
+        self.low = (0.0, 0.0, 0.0)
+        self.high = (0.0, 0.0, 0.0)
+        self.max_steps = resolution * 4
+        if not self.items:
+            return
+
+        xs = [o[3][0] for o in self.items] + [o[3][3] for o in self.items]
+        ys = [o[3][1] for o in self.items] + [o[3][4] for o in self.items]
+        zs = [o[3][2] for o in self.items] + [o[3][5] for o in self.items]
+        low = (min(xs), min(ys), min(zs))
+        high = (max(xs), max(ys), max(zs))
+        diagonal = math.sqrt(sum((high[i] - low[i]) ** 2 for i in range(3)))
+        self.origin = low
+        self.low = low
+        self.high = high
+        self.cell = max(diagonal / float(resolution), 1e-4)
+
+        for item_index, item in enumerate(self.items):
+            bb = item[3]
+            start = [int(math.floor((bb[i] - low[i]) / self.cell))
+                     for i in range(3)]
+            end = [int(math.floor((bb[i + 3] - low[i]) / self.cell))
+                   for i in range(3)]
+            for x in range(start[0], end[0] + 1):
+                for y in range(start[1], end[1] + 1):
+                    for z in range(start[2], end[2] + 1):
+                        self.cells.setdefault((x, y, z), []).append(
+                            item_index)
+
+    def _clip_to_scene(self, source, destination):
+        """把线段裁剪到遮挡体总包围盒内，返回 (t0, t1)。"""
+        origin = (source.x, source.y, source.z)
+        vector = (destination.x - origin[0], destination.y - origin[1],
+                  destination.z - origin[2])
+        t0, t1 = 0.0, 1.0
+        for axis in range(3):
+            if abs(vector[axis]) &lt; 1e-12:
+                if (origin[axis] &lt; self.low[axis]
+                        or origin[axis] &gt; self.high[axis]):
+                    return None
+                continue
+            first = (self.low[axis] - origin[axis]) / vector[axis]
+            second = (self.high[axis] - origin[axis]) / vector[axis]
+            if first &gt; second:
+                first, second = second, first
+            t0 = max(t0, first)
+            t1 = min(t1, second)
+            if t0 &gt; t1:
+                return None
+        return t0, t1
+
+    def _cells_on_segment(self, source, destination):
+        clipped = self._clip_to_scene(source, destination)
+        if clipped is None:
+            return
+        t0, t1 = clipped
+        ox, oy, oz = self.origin
+        cell = self.cell
+        sx = (source.x + (destination.x - source.x) * t0 - ox) / cell
+        sy = (source.y + (destination.y - source.y) * t0 - oy) / cell
+        sz = (source.z + (destination.z - source.z) * t0 - oz) / cell
+        ex = (source.x + (destination.x - source.x) * t1 - ox) / cell
+        ey = (source.y + (destination.y - source.y) * t1 - oy) / cell
+        ez = (source.z + (destination.z - source.z) * t1 - oz) / cell
+        dx, dy, dz = ex - sx, ey - sy, ez - sz
+
+        ix, iy, iz = int(math.floor(sx)), int(math.floor(sy)), int(
+            math.floor(sz))
+        step_x = 1 if dx &gt; 0 else -1
+        step_y = 1 if dy &gt; 0 else -1
+        step_z = 1 if dz &gt; 0 else -1
+        infinity = float("inf")
+        delta_x = abs(1.0 / dx) if dx else infinity
+        delta_y = abs(1.0 / dy) if dy else infinity
+        delta_z = abs(1.0 / dz) if dz else infinity
+        max_x = ((ix + (1 if dx &gt; 0 else 0)) - sx) / dx if dx else infinity
+        max_y = ((iy + (1 if dy &gt; 0 else 0)) - sy) / dy if dy else infinity
+        max_z = ((iz + (1 if dz &gt; 0 else 0)) - sz) / dz if dz else infinity
+
+        for _step in range(self.max_steps):
+            yield ix, iy, iz
+            if max_x &gt;= 1.0 and max_y &gt;= 1.0 and max_z &gt;= 1.0:
+                return
+            if max_x &lt;= max_y and max_x &lt;= max_z:
+                ix += step_x
+                max_x += delta_x
+            elif max_y &lt;= max_z:
+                iy += step_y
+                max_y += delta_y
+            else:
+                iz += step_z
+                max_z += delta_z
+
+    def candidates(self, source, destination):
+        if not self.cells:
+            return ()
+        seen = set()
+        result = []
+        for key in self._cells_on_segment(source, destination):
+            for item_index in self.cells.get(key, ()):
+                if item_index in seen:
+                    continue
+                seen.add(item_index)
+                result.append(self.items[item_index])
+        return result
+
+
+def _hit_distance(hit, source):
+    """兼容不同返回顺序，取命中点到射线起点的距离。"""
+    if not hit:
+        return None
+    values = hit if isinstance(hit, (tuple, list)) else (hit,)
+    for value in values:
+        if isinstance(value, (om.MPoint, om.MFloatPoint)):
+            return om.MVector(value - source).length()
+    for value in values:
+        if isinstance(value, float) and math.isfinite(value):
+            return value
+    return None
+
+
+def _ray_blocked(source, destination, index, skip_transform):
+    direction = om.MVector(destination - source)
+    distance = direction.length()
+    if distance &lt;= RAY_EPSILON:
+        return False
+    direction.normalize()
+    for fn, shape, transform, bounds in index.candidates(source, destination):
+        if transform == skip_transform:
+            continue
+        # 网格只是缩小候选集，仍需包围盒确认线段确实穿过它。
+        if not _segment_hits_bounds(source, destination, bounds, RAY_EPSILON):
+            continue
+        try:
+            hit = fn.closestIntersection(
+                source, direction, space=om.MSpace.kWorld,
+                maxParam=distance, testBothDirections=False)
+        except Exception as exc:
+            raise RuntimeError("遮挡射线失败：%s：%s" % (shape, exc))
+        hit_distance = _hit_distance(hit, source)
+        if (hit_distance is not None and RAY_EPSILON &lt; hit_distance
+                &lt; distance - RAY_EPSILON):
+            return True
+    return False
+
+
+def _ray_source(point, frustum):
+    if not frustum["ortho"]:
+        return frustum["eye"]
+    depth = _camera_point(point, frustum)[2]
+    return point - frustum["direction"] * max(
+        depth - frustum["near"], 0.0)
+
+
+def _occlusion_points(geometry, frustum, evidence):
+    points = list(evidence[:SAMPLES_PER_OBJ])
+    remaining = SAMPLES_PER_OBJ - len(points)
+    if remaining &lt;= 0:
+        return points
+    vertex_budget = max(1, remaining // 2)
+    centroid_budget = remaining - vertex_budget
+    candidates = _vertex_samples(geometry, vertex_budget)
+    if centroid_budget:
+        candidates.extend(_centroid_samples(geometry, centroid_budget))
+    points.extend(p for p in candidates if _point_in_frustum(p, frustum))
+    return points
+
+
+def _sampling_invisible(cam_shapes, frames, targets, progress=None):
+    """带轨迹日志的采样判定入口，崩溃后可查看最后一个物体。"""
+    _trace_start()
+    try:
+        return _sample_targets(cam_shapes, frames, targets, progress)
+    finally:
+        _trace_stop()
+
+
+def _sample_targets(cam_shapes, frames, targets, progress=None):
+    remaining = set(targets)
+    unresolved = []
+    skipped = []
+    unconfirmed = []
+    total_units = max(1, len(frames) * len(targets))
+    started = time.time()
+    for frame_index, frame in enumerate(frames):
+        _trace("帧 %s：设置时间" % frame)
+        cmds.currentTime(frame)
+        # 镜头位置和朝向必须在此帧重新求值，不能复用其他帧的矩阵。
+        _trace("帧 %s：计算镜头矩阵" % frame)
+        frustums = [(cam, _cam_frustum(cam)) for cam in cam_shapes]
+        _trace("帧 %s：构建遮挡体" % frame)
+        occluders = _build_occluders() if OCCLUSION else []
+        _trace("帧 %s：遮挡体 %d 个" % (frame, len(occluders)))
+        occluder_index = _OccluderIndex(occluders) if OCCLUSION else None
+        _trace("帧 %s：遮挡索引完成" % frame)
+        pending = [t for t in targets if t in remaining]
+        base = frame_index * len(targets)
+        _trace("帧 %s 开始，待判定 %d" % (frame, len(pending)))
+
+        for count, target in enumerate(pending, 1):
+            geometry = None
+            _trace("帧 %s 物体 %s" % (frame, target))
+            try:
+                if not _target_visible(target):
+                    continue  # 当前帧隐藏；仍可能在其他帧可见
+                bbox = _bbox_points(target)  # 每帧每物体只取一次
+                geometry = _target_geometry(target)
+                if geometry is None:
+                    # 超大网格不读取，按“无法确认、保留”处理，避免内存崩溃。
+                    remaining.discard(target)
+                    skipped.append(target)
+                    _trace("跳过超大网格：%s" % target)
+                    continue
+                visible = False
+                uncertain_target = False
+                for _camera, frustum in frustums:
+                    evidence, uncertain = _frustum_evidence(
+                        bbox, geometry, frustum,
+                        SAMPLES_PER_OBJ if OCCLUSION else 1)
+                    if uncertain:
+                        # 三角面预算不足：无法确认，保留物体，避免误选。
+                        uncertain_target = True
+                        break
+                    if not evidence:
+                        continue
+                    if not OCCLUSION:
+                        visible = True
+                        break
+                    points = _occlusion_points(geometry, frustum, evidence)
+                    if any(not _ray_blocked(_ray_source(p, frustum), p,
+                                            occluder_index, target)
+                           for p in points):
+                        visible = True
+                        break
+                if uncertain_target:
+                    remaining.discard(target)
+                    unconfirmed.append(target)
+                    _trace("三角预算不足，按可见保留：%s" % target)
+                elif visible:
+                    # 任一镜头、任一帧可见，就不再属于“始终不可见”。
+                    remaining.discard(target)
+            except Exception as exc:
+                remaining.discard(target)  # 出错不进入待删除选择
+                unresolved.append((target, str(exc)))
+            finally:
+                geometry = None  # 立即释放当前物体的几何数据
+                if progress is not None:
+                    done = base + count
+                    progress(int(done * 100.0 / total_units), done,
+                             total_units, time.time() - started)
+
+        print("帧 %g：待判定 %d，无法判定 %d" %
+              (frame, len(remaining), len(unresolved)))
+        if not remaining:
+            break
+
+    if progress is not None:
+        progress(100, total_units, total_units, time.time() - started)
+    if skipped:
+        print("网格过大、无法精确判定（已按可见保留）%d 个：" % len(skipped))
+        for target in skipped[:50]:
+            print("   ", target)
+        _trace("超大网格跳过 %d 个" % len(skipped))
+    if unconfirmed:
+        print("三角形超过预算、无法确认（已按可见保留）%d 个：" %
+              len(unconfirmed))
+        for target in unconfirmed[:50]:
+            print("   ", target)
+        _trace("三角预算不足保留 %d 个" % len(unconfirmed))
+    return [t for t in targets if t in remaining], unresolved
+
+
+# ---------------- 视口 ID-Buffer ----------------
+def _id_rgb(index):
+    levels = (
+        (index // (_ID_LEVELS * _ID_LEVELS)) % _ID_LEVELS,
+        (index // _ID_LEVELS) % _ID_LEVELS,
+        index % _ID_LEVELS,
+    )
+    return tuple(level / float(_ID_LEVELS - 1) for level in levels)
+
+
+def _decode_id(r, g, b):
+    levels = []
+    for value in (r, g, b):
+        level = int(round(value * (_ID_LEVELS - 1) / 255.0))
+        expected = int(round(level * 255.0 / (_ID_LEVELS - 1)))
+        if abs(value - expected) &gt; PIXEL_TOLERANCE:
+            return None
+        levels.append(level)
+    return (levels[0] * _ID_LEVELS * _ID_LEVELS
+            + levels[1] * _ID_LEVELS + levels[2])
+
+
+def _snapshot_draw_attrs(shape):
+    snapshot = {}
+    for attr in _DRAW_ATTRS:
+        plug = shape + "." + attr
+        if not cmds.objExists(plug):
+            continue
+        value = cmds.getAttr(plug)
+        if attr == "overrideColorRGB":
+            value = tuple(value[0])
+        snapshot[attr] = value
+    return snapshot
+
+
+def _restore_draw_attrs(shape, snapshot):
+    for attr, value in snapshot.items():
+        plug = shape + "." + attr
+        try:
+            if attr == "overrideColorRGB":
+                cmds.setAttr(plug, *value, type="double3")
+            else:
+                cmds.setAttr(plug, value)
+        except Exception:
+            pass
+
+
+def _paint_shape(shape, index):
+    r, g, b = _id_rgb(index)  # 归一化 0..1，不是 0..255
+    cmds.setAttr(shape + ".overrideEnabled", True)
+    cmds.setAttr(shape + ".overrideRGBColors", True)
+    cmds.setAttr(shape + ".overrideColorRGB", r, g, b, type="double3")
+    cmds.setAttr(shape + ".overrideShading", False)
+    if cmds.objExists(shape + ".overrideTexturing"):
+        cmds.setAttr(shape + ".overrideTexturing", False)
+
+
+def _editor_flags():
+    return {
+        "displayAppearance": "flatShaded",
+        "displayLights": "flat",
+        "textures": False,
+        "useDefaultMaterial": False,
+        "wireframeOnShaded": False,
+        "shadows": False,
+        "cmEnabled": False,
+        "grid": False,
+        "headsUpDisplay": False,
+        "selectionHiliteDisplay": False,
+    }
+
+
+def _view_camera(view):
+    """兼容 API 2.0 的 getCamera() 与旧版 camera()。"""
+    for name in ("getCamera", "camera"):
+        getter = getattr(view, name, None)
+        if getter is None:
+            continue
+        try:
+            return getter()
+        except Exception:
+            continue
+    return None
+
+
+def _camera_object(cam_shape):
+    return _to_dag_path(cam_shape).node()
+
+
+def _pixel_exact_invisible(cam_shapes, frames, targets):
+    """成功时返回不可见列表；视口条件不满足时返回 None。"""
+    snapshots = {}
+    editor_old = {}
+    hardware_old = {}
+    original_selection = cmds.ls(selection=True, long=True) or []
+    original_camera = None
+    view = None
+    panel = None
+    try:
+        if EXCLUDE_OCCLUDERS:
+            raise _PixelUnavailable(
+                "ID-Buffer 不能在同一 pass 中独立排除透明遮挡体")
+        try:
+            import maya.api.OpenMayaUI as omui
+            view = omui.M3dView.active3dView()
+            panel = cmds.playblast(activeEditor=True)
+            original_camera = _view_camera(view)
+            if original_camera is None:
+                raise RuntimeError("无法读取视口当前镜头")
+        except Exception as exc:
+            raise _PixelUnavailable("需要活动 Maya 3D 视口：%s" % exc)
+
+        try:
+            for flag, new_value in _editor_flags().items():
+                editor_old[flag] = cmds.modelEditor(
+                    panel, query=True, **{flag: True})
+                cmds.modelEditor(panel, edit=True, **{flag: new_value})
+        except Exception as exc:
+            raise _PixelUnavailable(
+                "无法安全设置视口显示或色彩管理：%s" % exc)
+
+        try:
+            for attr in ("multiSampleEnable", "ssaoEnable"):
+                plug = "hardwareRenderingGlobals." + attr
+                if not cmds.objExists(plug):
+                    raise RuntimeError("缺少属性：" + plug)
+                hardware_old[attr] = cmds.getAttr(plug)
+                cmds.setAttr(plug, False)
+        except Exception as exc:
+            raise _PixelUnavailable(
+                "无法关闭多重采样或 SSAO：%s" % exc)
+
+        draw_shapes = []
+        for node_type in _DRAW_TYPES:
+            draw_shapes.extend(_all_shapes(node_type))
+        draw_shapes = list(dict.fromkeys(draw_shapes))
+        target_ids = {target: i + 1 for i, target in enumerate(targets)}
+        non_target_id = _ID_LEVELS ** 3 - 1
+        cmds.select(clear=True)  # 防止选择高亮覆盖 ID 色
+
+        for shape in draw_shapes:
+            snapshots[shape] = _snapshot_draw_attrs(shape)
+            transform = _parent_transform(shape)
+            _paint_shape(shape, target_ids.get(transform, non_target_id))
+
+        visible_ids = set()
+        image = om.MImage()
+        for frame in frames:
+            cmds.currentTime(frame)
+            # primaryVisibility 不影响普通视口显示，需显式同步到 ID pass。
+            for shape in draw_shapes:
+                old = snapshots[shape]
+                originally_hidden = (
+                    old.get("overrideEnabled", False)
+                    and not old.get("overrideVisibility", True))
+                primary_visible = (
+                    not cmds.objExists(shape + ".primaryVisibility")
+                    or bool(cmds.getAttr(shape + ".primaryVisibility")))
+                cmds.setAttr(shape + ".overrideVisibility",
+                             primary_visible and not originally_hidden)
+
+            for camera in cam_shapes:
+                try:
+                    view.setCamera(_camera_object(camera))
+                    view.refresh()
+                    image = om.MImage()
+                    try:
+                        view.readColorBuffer(image, False)
+                    except TypeError:
+                        view.readColorBuffer(image)
+                    width, height = image.getSize()
+                    pixels = image.pixels()
+                    if width &lt;= 0 or height &lt;= 0 or len(pixels) &lt; width * height * 4:
+                        raise RuntimeError("颜色缓冲为空或尺寸无效")
+                except Exception as exc:
+                    raise _PixelUnavailable("读取视口失败：%s" % exc)
+
+                for y in range(height):
+                    row = y * width * 4
+                    for x in range(width):
+                        offset = row + x * 4
+                        index = _decode_id(
+                            pixels[offset], pixels[offset + 1], pixels[offset + 2])
+                        if index is not None and 1 &lt;= index &lt;= len(targets):
+                            visible_ids.add(index)
+                    if len(visible_ids) == len(targets):
+                        break
+                if len(visible_ids) == len(targets):
+                    break
+            if len(visible_ids) == len(targets):
+                break
+
+        return [target for i, target in enumerate(targets)
+                if i + 1 not in visible_ids]
+    except _PixelUnavailable as exc:
+        print("视口 ID-Buffer 不可用：%s；退回采样判定。" % exc)
+        return None
+    except Exception as exc:
+        print("视口 ID-Buffer 失败：%s；退回采样判定。" % exc)
+        return None
+    finally:
+        for shape, old in snapshots.items():
+            _restore_draw_attrs(shape, old)
+        for attr, value in hardware_old.items():
+            try:
+                cmds.setAttr("hardwareRenderingGlobals." + attr, value)
+            except Exception:
+                pass
+        if panel:
+            for flag, value in editor_old.items():
+                try:
+                    cmds.modelEditor(panel, edit=True, **{flag: value})
+                except Exception:
+                    pass
+        try:
+            if view is not None and original_camera is not None:
+                view.setCamera(original_camera)
+                view.refresh()
+        except Exception:
+            pass
+        try:
+            if original_selection:
+                cmds.select(original_selection, replace=True)
+            else:
+                cmds.select(clear=True)
+        except Exception:
+            pass
+
+
+def _report(invisible, unresolved):
+    for target, reason in unresolved:
+        print("无法判定（未选中）：%s\n    %s" % (target, reason))
+    if invisible:
+        cmds.select(invisible, replace=True)
+        print("在指定镜头和帧范围内始终不可见的物体 %d 个（已选中）：" %
+              len(invisible))
+        for target in invisible:
+            print("   ", target)
+        try:
+            cmds.inViewMessage(
+                amg="&lt;hl&gt;%d&lt;/hl&gt; 个物体始终不可见，已选中" % len(invisible),
+                pos="midCenter", fade=True)
+        except Exception:
+            pass
+    else:
+        cmds.select(clear=True)
+        print("没有发现可确认的始终不可见物体。")
+    if unresolved:
+        print("另有 %d 个物体无法判定，请查看上方原因。" % len(unresolved))
+
+
+def _notify(title, message):
+    """用消息框显示信息；无 GUI 时退回脚本编辑器输出。"""
+    print(message)
+    try:
+        cmds.confirmDialog(title=title, message=message, button=["确定"],
+                           defaultButton="确定", dismissString="确定",
+                           icon="information")
+    except Exception:
+        pass
+
+
+def _run_detection(cam_shapes, targets, frames, progress=None):
+    """按已统计好的镜头、物体、帧执行判定，并恢复原始时间。"""
+    _validate_options(targets)
+    original_time = cmds.currentTime(query=True)
+    try:
+        invisible = None
+        unresolved = []
+        if PIXEL_EXACT:
+            invisible = _pixel_exact_invisible(cam_shapes, frames, targets)
+            if invisible is not None:
+                print("视口 ID-Buffer 判定完成。")
+
+        if invisible is None:
+            invisible, unresolved = _sampling_invisible(
+                cam_shapes, frames, targets, progress)
+        elif progress is not None:
+            progress(100, 1, 1, 0.0)
+        _report(invisible, unresolved)
+        return invisible
+    finally:
+        try:
+            cmds.currentTime(original_time)
+        except Exception:
+            pass
+
+
+def select_invisible(*_args):
+    """脚本编辑器入口：按当前选择和作用域直接判定。"""
+    try:
+        selection = cmds.ls(selection=True, long=True) or []
+        cam_shapes = _cameras(selection)
+        if not cam_shapes:
+            cmds.warning("没有可用镜头")
+            return []
+        targets = _target_transforms(selection)
+        if not targets:
+            cmds.warning("没有参与判定的网格物体")
+            return []
+        frames = _sample_frames()
+        _validate_options(targets)
+        _notify("不可见物体判定",
+                "镜头 %d 个\n帧 %d 个（%g 至 %g）\n候选物体 %d 个" %
+                (len(cam_shapes), len(frames), frames[0], frames[-1],
+                 len(targets)))
+        return _run_detection(cam_shapes, targets, frames)
+    except Exception as exc:
+        cmds.warning("不可见物体判定已中止：%s" % exc)
+        return []
+
+
+# ---------------- 界面 ----------------
+_WINDOW = "invisibleObjectFinderWindow"
+_FIELD_START = "iofStartField"
+_FIELD_END = "iofEndField"
+_FIELD_STEP = "iofStepField"
+_CHECK_OCCLUSION = "iofOcclusionCheck"
+_CHECK_EXACT = "iofExactCheck"
+_CHECK_PIXEL = "iofPixelCheck"
+_INFO = "iofInfoText"
+_PROGRESS_BAR = "iofProgressBar"
+_PROGRESS_TEXT = "iofProgressText"
+_BUTTON_START = "iofStartButton"
+_CAMERA_LIST = "iofCameraList"
+_CAMERAS_CACHE = []
+
+
+def _format_seconds(seconds):
+    seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return "%d 小时 %d 分" % (hours, minutes)
+    if minutes:
+        return "%d 分 %d 秒" % (minutes, secs)
+    return "%d 秒" % secs
+
+
+def _set_progress(percent, elapsed):
+    percent = max(0, min(100, int(percent)))
+    if percent &gt;= 100:
+        eta = "0 秒"
+    elif percent &gt; 0 and elapsed &gt; 0.2:
+        eta = _format_seconds(elapsed * (100.0 - percent) / percent)
+    else:
+        eta = "计算中…"
+    label = "进度 %d%%    已用 %s    预计剩余 %s" % (
+        percent, _format_seconds(elapsed), eta)
+    try:
+        cmds.progressBar(_PROGRESS_BAR, edit=True, progress=percent)
+        cmds.text(_PROGRESS_TEXT, edit=True, label=label)
+        _trace("界面刷新 %d%%" % percent)
+        cmds.refresh(force=True)
+    except Exception:
+        pass  # 窗口被关闭时静默继续
+
+
+def _make_progress():
+    """返回带节流的进度回调，避免每个物体都刷新界面。"""
+    state = {"percent": -1, "time": 0.0}
+
+    def update(percent, done, total, elapsed):
+        percent = max(0, min(100, int(percent)))
+        now = time.time()
+        if percent == state["percent"] and now - state["time"] &lt; 0.4:
+            return
+        state["percent"] = percent
+        state["time"] = now
+        _set_progress(percent, elapsed)
+
+    return update
+
+
+def _frame_field(field):
+    text = (cmds.textFieldGrp(field, query=True, text=True) or "").strip()
+    return float(text) if text else None
+
+
+def _camera_label(shape):
+    """列表显示大纲里的节点名（相机 transform），不带 Shape 后缀。"""
+    parents = cmds.listRelatives(shape, parent=True) or []
+    return parents[0] if parents else _short(shape)
+
+
+def _refresh_cameras(*_args):
+    """重新枚举场景镜头并默认全选。"""
+    global _CAMERAS_CACHE
+    _CAMERAS_CACHE = _cameras([])
+    labels = [_camera_label(cam) for cam in _CAMERAS_CACHE]
+    cmds.textScrollList(_CAMERA_LIST, edit=True, removeAll=True)
+    if labels:
+        cmds.textScrollList(_CAMERA_LIST, edit=True, append=labels)
+        cmds.textScrollList(
+            _CAMERA_LIST, edit=True,
+            selectIndexedItem=list(range(1, len(labels) + 1)))
+    return _CAMERAS_CACHE
+
+
+def _select_all_cameras(*_args):
+    indices = list(range(1, len(_CAMERAS_CACHE) + 1))
+    if indices:
+        cmds.textScrollList(_CAMERA_LIST, edit=True,
+                            selectIndexedItem=indices)
+
+
+def _select_no_cameras(*_args):
+    cmds.textScrollList(_CAMERA_LIST, edit=True, deselectAll=True)
+
+
+def _chosen_cameras():
+    """面板里勾选的镜头；列表为空时退回视口选择/全部镜头。"""
+    listed = _CAMERAS_CACHE
+    if not listed:
+        return _cameras(cmds.ls(selection=True, long=True) or [])
+    indices = cmds.textScrollList(_CAMERA_LIST, query=True,
+                                  selectIndexedItem=True) or []
+    if not indices:
+        return None
+    return [listed[i - 1] for i in indices if 0 &lt; i &lt;= len(listed)]
+
+
+def _main_window_minimized():
+    """检测 Maya 主窗口是否最小化；取不到 Qt 时视为正常。"""
+    try:
+        from maya import OpenMayaUI as legacy_ui
+    except Exception:
+        return False
+    try:
+        from shiboken2 import wrapInstance
+        from PySide2 import QtWidgets
+    except Exception:
+        try:
+            from shiboken6 import wrapInstance
+            from PySide6 import QtWidgets
+        except Exception:
+            return False
+    try:
+        pointer = legacy_ui.MQtUtil.mainWindow()
+        if not pointer:
+            return False
+        window = wrapInstance(int(pointer), QtWidgets.QWidget)
+        return bool(window and window.isMinimized())
+    except Exception:
+        return False
+
+
+def _pixel_preflight(targets):
+    """返回无法使用视口 ID-Buffer 的原因与解决方法列表。"""
+    problems = []
+    try:
+        if cmds.about(batch=True):
+            problems.append((
+                "当前是批处理/无界面会话（mayapy 或 -batch），没有 3D 视口。",
+                "用 Maya 图形界面正常启动后再运行脚本，不要用 mayapy。"))
+    except Exception:
+        pass
+
+    try:
+        import maya.api.OpenMayaUI as omui
+    except Exception:
+        problems.append((
+            "当前环境无法加载 maya.api.OpenMayaUI，说明不是 GUI 会话。",
+            "改用 Maya 图形界面启动，并确认安装完整。"))
+        return problems
+
+    view = None
+    try:
+        view = omui.M3dView.active3dView()
+    except Exception as exc:
+        problems.append((
+            "读取活动视口失败：%s" % exc,
+            "重新打开一个 3D 视图面板后再试。"))
+    if view is None:
+        problems.append((
+            "没有活动的 3D 视口（可能所有视图都被关闭或替换）。",
+            "打开一个 3D 视图面板并点击使其激活，不要把脚本编辑器最大化"
+            "覆盖整个视图区域。"))
+        return problems
+
+    try:
+        view.getCamera()
+    except Exception as exc:
+        problems.append((
+            "活动视口不可用：%s" % exc,
+            "恢复或新建一个 3D 视图面板后重试。"))
+
+    try:
+        width, height = view.portWidth(), view.portHeight()
+    except Exception:
+        width, height = None, None
+    if width is not None and (width &lt;= 0 or height &lt;= 0):
+        problems.append((
+            "视口尺寸为 0，画面没有实际绘制。",
+            "取消最小化 Maya 主窗口，恢复视图面板大小后再运行。"))
+
+    if _main_window_minimized():
+        problems.append((
+            "Maya 主窗口处于最小化状态，视口不会刷新。",
+            "还原 Maya 主窗口并保持可见后重新运行。"))
+
+    capacity = _ID_LEVELS ** 3
+    if len(targets) &gt; capacity:
+        problems.append((
+            "候选物体 %d 个，超过 ID 色容量 %d 个，无法分配唯一颜色。"
+            % (len(targets), capacity),
+            "先在视口里选中部分物体缩小范围，或分批检测。"))
+
+    return problems
+
+
+def _pixel_problem_message(problems):
+    lines = ["无法使用「视口 ID-Buffer」模式："]
+    for number, (reason, solution) in enumerate(problems, 1):
+        lines.append("%d. %s" % (number, reason))
+        lines.append("   解决方法：%s" % solution)
+    lines.append("")
+    lines.append("可以取消勾选后改用采样模式，精度略低但不受视口限制。")
+    return "\n".join(lines)
+
+
+def _ui_start(*_args):
+    """点击开始后才扫描场景并执行判定。"""
+    global FRAME_START, FRAME_END, FRAME_STEP
+    global OCCLUSION, EXACT_FRUSTUM, PIXEL_EXACT
+    try:
+        FRAME_START = _frame_field(_FIELD_START)
+        FRAME_END = _frame_field(_FIELD_END)
+        FRAME_STEP = _frame_field(_FIELD_STEP)
+        if FRAME_STEP is None:
+            FRAME_STEP = 1.0
+    except ValueError:
+        cmds.warning("帧范围必须填写数字，留空表示使用播放范围")
+        return
+
+    OCCLUSION = cmds.checkBox(_CHECK_OCCLUSION, query=True, value=True)
+    EXACT_FRUSTUM = cmds.checkBox(_CHECK_EXACT, query=True, value=True)
+    PIXEL_EXACT = cmds.checkBox(_CHECK_PIXEL, query=True, value=True)
+
+    selection = cmds.ls(selection=True, long=True) or []
+    cam_shapes = _chosen_cameras()
+    if cam_shapes is None:
+        cmds.warning("请至少选择一个镜头（或点击「全选」）")
+        return
+    targets = _target_transforms(selection)
+    try:
+        frames = _sample_frames()
+    except Exception as exc:
+        cmds.text(_INFO, edit=True, label="帧范围无效：%s" % exc)
+        cmds.warning("帧范围无效：%s" % exc)
+        return
+
+    info = ("镜头：%d 个\n模型：%d 个\n帧：%d 个（%g 至 %g）" %
+            (len(cam_shapes), len(targets), len(frames),
+             frames[0], frames[-1]))
+    cmds.text(_INFO, edit=True, label=info)
+    cmds.refresh(force=True)
+    print(info.replace("\n", "，"))
+
+    if not cam_shapes:
+        cmds.warning("场景里没有可用镜头")
+        return
+    if not targets:
+        cmds.warning("场景里没有可判定的网格模型")
+        return
+
+    if PIXEL_EXACT:
+        problems = _pixel_preflight(targets)
+        if problems:
+            message = _pixel_problem_message(problems)
+            print(message)
+            try:
+                choice = cmds.confirmDialog(
+                    title="无法运行视口 ID-Buffer",
+                    message=message,
+                    button=["改用采样判定", "取消"],
+                    defaultButton="改用采样判定",
+                    cancelButton="取消",
+                    dismissString="取消")
+            except Exception:
+                choice = "改用采样判定"
+            if choice != "改用采样判定":
+                return
+            PIXEL_EXACT = False
+            try:
+                cmds.checkBox(_CHECK_PIXEL, edit=True, value=False)
+            except Exception:
+                pass
+
+    update = _make_progress()
+    _set_progress(0, 0.0)
+    try:
+        cmds.button(_BUTTON_START, edit=True, enable=False)
+    except Exception:
+        pass
+    try:
+        return _run_detection(cam_shapes, targets, frames, update)
+    except Exception as exc:
+        cmds.warning("不可见物体判定已中止：%s" % exc)
+        return []
+    finally:
+        try:
+            cmds.button(_BUTTON_START, edit=True, enable=True)
+        except Exception:
+            pass
+
+
+def show_ui(*_args):
+    """打开检测面板；点击「开始」后才统计场景并运行。"""
+    if cmds.window(_WINDOW, exists=True):
+        cmds.deleteUI(_WINDOW)
+
+    cmds.window(_WINDOW, title="不可见物体检测", widthHeight=(380, 560),
+                sizeable=False)
+    cmds.columnLayout(adjustableColumn=True, rowSpacing=8,
+                      columnAttach=("both", 10))
+    cmds.text(label="选择镜头后可只跑其中几个；帧范围对已选镜头生效。",
+              align="left")
+    cmds.frameLayout(label="镜头（可多选）", collapsable=False)
+    cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
+    cmds.textScrollList(_CAMERA_LIST, numberOfRows=6, height=96,
+                        allowMultiSelection=True)
+    cmds.rowColumnLayout(numberOfColumns=3,
+                         columnWidth=[(1, 108), (2, 108), (3, 108)],
+                         columnSpacing=[(1, 5), (2, 5)])
+    cmds.button(label="全选", height=24, command=_select_all_cameras)
+    cmds.button(label="全不选", height=24, command=_select_no_cameras)
+    cmds.button(label="刷新", height=24, command=_refresh_cameras)
+    cmds.setParent("..")
+    cmds.setParent("..")
+    cmds.setParent("..")
+    cmds.frameLayout(label="帧范围（留空 = 播放范围）", collapsable=False)
+    cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
+    cmds.textFieldGrp(_FIELD_START, label="起始帧", text="")
+    cmds.textFieldGrp(_FIELD_END, label="结束帧", text="")
+    cmds.textFieldGrp(_FIELD_STEP, label="帧步长", text="1")
+    cmds.setParent("..")
+    cmds.setParent("..")
+
+    cmds.checkBox(_CHECK_OCCLUSION, label="遮挡判定", value=OCCLUSION)
+    cmds.checkBox(_CHECK_EXACT, label="精确视锥裁剪", value=EXACT_FRUSTUM)
+    cmds.checkBox(_CHECK_PIXEL, label="视口 ID-Buffer（需 GUI）",
+                  value=PIXEL_EXACT)
+    cmds.text(_INFO, label="点击「开始」后统计场景数据", align="left")
+    cmds.progressBar(_PROGRESS_BAR, minValue=0, maxValue=100, height=16)
+    cmds.text(_PROGRESS_TEXT, label="进度 0%    已用 0 秒    预计剩余 --",
+              align="left")
+
+    cmds.rowColumnLayout(numberOfColumns=2,
+                         columnWidth=[(1, 168), (2, 168)],
+                         columnSpacing=[(1, 6)])
+    cmds.button(_BUTTON_START, label="开始", height=32, command=_ui_start)
+    cmds.button(label="关闭", height=32,
+                command=lambda *_: cmds.deleteUI(_WINDOW))
+    cmds.setParent("..")
+    _refresh_cameras()
+    cmds.showWindow(_WINDOW)
+
+
+if __name__ == "__main__":
+    show_ui()
+</code></pre>
+</main>
+<div class="toast" id="toast"></div>
+<script>
+(function () {
+  var codeEl = document.getElementById('code');
+  var copyBtn = document.getElementById('copy');
+  var dlBtn = document.getElementById('download');
+  var toast = document.getElementById('toast');
+  var toastTimer = null;
+
+  function showToast(message, fail) {
+    toast.textContent = message;
+    toast.className = 'toast show' + (fail ? ' fail' : '');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () {
+      toast.className = 'toast' + (fail ? ' fail' : '');
+    }, 1600);
+  }
+
+  function fallbackCopy(text) {
+    var area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.top = '-9999px';
+    document.body.appendChild(area);
+    area.select();
+    area.setSelectionRange(0, text.length);
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    document.body.removeChild(area);
+    return ok;
+  }
+
+  function copied() {
+    copyBtn.textContent = '已复制 ✓';
+    copyBtn.classList.add('done');
+    showToast('已复制到剪贴板');
+    setTimeout(function () {
+      copyBtn.textContent = '复制代码';
+      copyBtn.classList.remove('done');
+    }, 1500);
+  }
+
+  copyBtn.addEventListener('click', function () {
+    var text = codeEl.textContent;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(copied, function () {
+        if (fallbackCopy(text)) { copied(); }
+        else { showToast('复制失败，请手动全选复制', true); }
+      });
+    } else if (fallbackCopy(text)) {
+      copied();
+    } else {
+      showToast('复制失败，请手动全选复制', true);
+    }
+  });
+
+  dlBtn.addEventListener('click', function () {
+    var blob = new Blob([codeEl.textContent], { type: 'text/x-python;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'select_invisible.py';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    showToast('已开始下载 select_invisible.py');
+  });
+})();
+</script>
+</body>
+</html>
