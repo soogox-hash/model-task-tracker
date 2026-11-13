@@ -1672,7 +1672,6 @@ def show_ui(*_args):
                   annotation="逐像素精确判定，需要 Maya GUI 会话")
     cmds.setParent("..")
     cmds.setParent("..")
-    cmds.text(_INFO, label="点击「开始」后统计场景数据", align="center")
     # 进度条默认隐藏，但保留固定高度的容器，开始后出现时界面不跳动。
     cmds.frameLayout(_PROGRESS_BOX, height=26, borderVisible=False,
                      labelVisible=False, collapsable=False)
@@ -1690,6 +1689,7 @@ def show_ui(*_args):
     cmds.button(_BUTTON_CLOSE, label="关闭", height=32, width=150,
                 command=_close_ui)
     cmds.setParent("..")
+    cmds.text(_INFO, label="点击「开始」后统计场景数据", align="center")
     cmds.text(_PROGRESS_TEXT, label="进度 0%    已用 0 秒    预计剩余 --",
               align="center", visible=False)
     _refresh_cameras()
