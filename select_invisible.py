@@ -1207,6 +1207,7 @@ _PROGRESS_BAR = "iofProgressBar"
 _PROGRESS_TEXT = "iofProgressText"
 _PROGRESS_BOX = "iofProgressBox"
 _BUTTON_START = "iofStartButton"
+_BUTTON_CLOSE = "iofCloseButton"
 _CAMERA_LIST = "iofCameraList"
 _CAMERAS_CACHE = []
 _FRAME_FOLLOW_JOB = None
@@ -1325,6 +1326,50 @@ def _close_ui(*_args):
     _stop_frame_follow()
     if cmds.window(_WINDOW, exists=True):
         cmds.deleteUI(_WINDOW)
+
+
+def _style_round_button(name, primary=True):
+    """把 Maya 原生按钮替换为圆角样式；取不到 Qt 时保持默认外观。"""
+    try:
+        from maya import OpenMayaUI as omui
+    except Exception:
+        return
+    try:
+        from shiboken2 import wrapInstance
+        from PySide2 import QtWidgets
+    except Exception:
+        try:
+            from shiboken6 import wrapInstance
+            from PySide6 import QtWidgets
+        except Exception:
+            return
+    try:
+        pointer = omui.MQtUtil.findControl(name)
+        if not pointer:
+            return
+        widget = wrapInstance(int(pointer), QtWidgets.QPushButton)
+        if primary:
+            css = (
+                "QPushButton {background-color:#2563eb; color:#ffffff;"
+                " border:none; border-radius:10px; font-size:13px;}"
+                "QPushButton:hover {background-color:#3b82f6;}"
+                "QPushButton:pressed {background-color:#1d4ed8;}")
+        else:
+            css = (
+                "QPushButton {background-color:#ffffff; color:#1f2328;"
+                " border:1px solid #d0d5dd; border-radius:10px;"
+                " font-size:13px;}"
+                "QPushButton:hover {background-color:#f2f4f7;}"
+                "QPushButton:pressed {background-color:#e4e7ec;}")
+        widget.setStyleSheet(css)
+    except Exception:
+        pass
+
+
+def _round_button(name, label, command, primary=True, width=150):
+    cmds.button(name, label=label, height=34, width=width, command=command)
+    _style_round_button(name, primary)
+    return name
 
 
 def _camera_label(shape):
@@ -1538,6 +1583,11 @@ def _ui_start(*_args):
                 pass
 
     update = _make_progress()
+    try:
+        # 开始后隐藏统计信息，让位给进度条与进度文字。
+        cmds.text(_INFO, edit=True, visible=False)
+    except Exception:
+        pass
     _set_progress(0, 0.0)
     try:
         cmds.button(_BUTTON_START, edit=True, enable=False)
@@ -1589,13 +1639,16 @@ def show_ui(*_args):
     cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
     current_frame = _current_frame_text()
     cmds.textFieldGrp(_FIELD_START, label="起始帧", text=current_frame,
-                      width=172, columnWidth=[(1, 46), (2, 118)],
+                      width=172, adjustableColumn=0,
+                      columnWidth=[(1, 52), (2, 110)],
                       changeCommand=_frame_manual_edit)
     cmds.textFieldGrp(_FIELD_END, label="结束帧", text=current_frame,
-                      width=172, columnWidth=[(1, 46), (2, 118)],
+                      width=172, adjustableColumn=0,
+                      columnWidth=[(1, 52), (2, 110)],
                       changeCommand=_frame_manual_edit)
     cmds.textFieldGrp(_FIELD_STEP, label="帧步长", text="1",
-                      width=172, columnWidth=[(1, 46), (2, 118)])
+                      width=172, adjustableColumn=0,
+                      columnWidth=[(1, 52), (2, 110)])
     cmds.setParent("..")
 
     cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
@@ -1609,7 +1662,13 @@ def show_ui(*_args):
     cmds.setParent("..")
     cmds.setParent("..")
     cmds.setParent("..")
-    cmds.text(_INFO, label="点击「开始」后统计场景数据", align="left")
+    cmds.rowColumnLayout(numberOfColumns=2,
+                         columnWidth=[(1, 150), (2, 150)],
+                         columnSpacing=[(1, 24)])
+    _round_button(_BUTTON_START, "开始", _ui_start, primary=True)
+    _round_button(_BUTTON_CLOSE, "关闭", _close_ui, primary=False)
+    cmds.setParent("..")
+    cmds.text(_INFO, label="点击「开始」后统计场景数据", align="center")
     # 进度条默认隐藏，但保留固定高度的容器，开始后出现时界面不跳动。
     cmds.frameLayout(_PROGRESS_BOX, height=24, borderVisible=False,
                      labelVisible=False, collapsable=False)
@@ -1617,14 +1676,7 @@ def show_ui(*_args):
                      visible=False)
     cmds.setParent("..")
     cmds.text(_PROGRESS_TEXT, label="进度 0%    已用 0 秒    预计剩余 --",
-              align="center")
-
-    cmds.rowColumnLayout(numberOfColumns=2,
-                         columnWidth=[(1, 168), (2, 168)],
-                         columnSpacing=[(1, 6)])
-    cmds.button(_BUTTON_START, label="开始", height=32, command=_ui_start)
-    cmds.button(label="关闭", height=32, command=_close_ui)
-    cmds.setParent("..")
+              align="center", visible=False)
     _refresh_cameras()
     _start_frame_follow()
     cmds.showWindow(_WINDOW)
