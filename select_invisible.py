@@ -1594,31 +1594,29 @@ def show_ui(*_args):
                      collapsable=False)
     cmds.rowColumnLayout(numberOfColumns=2,
                          columnWidth=[(1, 172), (2, 172)],
-                         columnSpacing=[(1, 8)])
-    cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
+                         columnSpacing=[(1, 8)],
+                         rowSpacing=6,
+                         rowAttach=[(1, "center", 0), (2, "center", 0)],
+                         columnAlign=[(1, "left"), (2, "left")])
     current_frame = _current_frame_text()
     cmds.textFieldGrp(_FIELD_START, label="起始帧", text=current_frame,
-                      width=172, adjustableColumn=0,
+                      height=24, width=172, adjustableColumn=0,
                       columnWidth=[(1, 52), (2, 110)],
                       changeCommand=_frame_manual_edit)
-    cmds.textFieldGrp(_FIELD_END, label="结束帧", text=current_frame,
-                      width=172, adjustableColumn=0,
-                      columnWidth=[(1, 52), (2, 110)],
-                      changeCommand=_frame_manual_edit)
-    cmds.textFieldGrp(_FIELD_STEP, label="帧步长", text="1",
-                      width=172, adjustableColumn=0,
-                      columnWidth=[(1, 52), (2, 110)])
-    cmds.setParent("..")
-
-    cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
     cmds.checkBox(_CHECK_OCCLUSION, label="遮挡判定", value=OCCLUSION,
-                  width=172)
+                  height=24, width=172)
+    cmds.textFieldGrp(_FIELD_END, label="结束帧", text=current_frame,
+                      height=24, width=172, adjustableColumn=0,
+                      columnWidth=[(1, 52), (2, 110)],
+                      changeCommand=_frame_manual_edit)
     cmds.checkBox(_CHECK_EXACT, label="精确视锥裁剪", value=EXACT_FRUSTUM,
-                  width=172)
+                  height=24, width=172)
+    cmds.textFieldGrp(_FIELD_STEP, label="帧步长", text="1",
+                      height=24, width=172, adjustableColumn=0,
+                      columnWidth=[(1, 52), (2, 110)])
     cmds.checkBox(_CHECK_PIXEL, label="视口 ID-Buffer", value=PIXEL_EXACT,
-                  width=172,
+                  height=24, width=172,
                   annotation="逐像素精确判定，需要 Maya GUI 会话")
-    cmds.setParent("..")
     cmds.setParent("..")
     cmds.setParent("..")
     cmds.text(_INFO, label="点击「开始」后统计场景数据", align="center")
