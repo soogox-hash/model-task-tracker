@@ -45,7 +45,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.1.7"           # 用于确认当前加载的是哪份脚本
+VERSION = "1.1.8"           # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -1694,8 +1694,6 @@ _CHECK_PIXEL = "iofPixelCheck"
 _INFO = "iofInfoText"
 _PROGRESS_BAR = "iofProgressBar"
 _PROGRESS_TEXT = "iofProgressText"
-_PROGRESS_BOX = "iofProgressBox"
-_PROGRESS_FORM = "iofProgressForm"
 _BUTTON_START = "iofStartButton"
 _BUTTON_CLOSE = "iofCloseButton"
 _BUTTON_CHECK = "iofCheckButton"
@@ -2144,7 +2142,7 @@ def show_ui(*_args):
                       columnAttach=("both", 10))
     cmds.text(label="选择镜头后可只跑其中几个；帧范围对已选镜头生效。",
               align="left")
-    cmds.frameLayout(label="镜头（可多选）", collapsable=False)
+    cmds.text(label="镜头（可多选）", align="left")
     cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
     cmds.textScrollList(_CAMERA_LIST, numberOfRows=6, height=96,
                         allowMultiSelection=True)
@@ -2163,9 +2161,7 @@ def show_ui(*_args):
     cmds.text(label="", width=10)
     cmds.setParent("..")
     cmds.setParent("..")
-    cmds.setParent("..")
-    cmds.frameLayout(label="帧范围与判定选项（帧范围默认跟随当前帧）",
-                     collapsable=False)
+    cmds.text(label="帧范围与判定选项（帧范围默认跟随当前帧）", align="left")
     cmds.rowColumnLayout(numberOfColumns=2,
                          columnWidth=[(1, 172), (2, 172)],
                          columnSpacing=[(1, 8)],
@@ -2190,7 +2186,6 @@ def show_ui(*_args):
     cmds.checkBox(_CHECK_PIXEL, label="视口 ID-Buffer", value=PIXEL_EXACT,
                   height=24, width=172,
                   annotation="逐像素精确判定，需要 Maya GUI 会话")
-    cmds.setParent("..")
     cmds.setParent("..")
     # 进度条默认隐藏；直接放在主列里，隐藏时不占额外高度。
     cmds.progressBar(_PROGRESS_BAR, minValue=0, maxValue=100,
