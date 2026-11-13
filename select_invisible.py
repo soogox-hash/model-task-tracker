@@ -32,6 +32,8 @@ PIXEL_EXACT 保留原参数名，但实际是“视口 ID-Buffer 模式”：逐
 目标过多或需要独立排除透明遮挡体时，会安全退回采样模式。
 """
 import math
+import os
+import tempfile
 import time
 from array import array
 
@@ -55,6 +57,11 @@ RAY_EPSILON = 0.01          # 遮挡射线端点容差（场景单位）
 PIXEL_TOLERANCE = 1         # ID 缓冲每通道允许的 8-bit 误差
 EXACT_TRIANGLE_BUDGET = 200000  # 单物体精确视锥裁剪的三角形上限
 PROGRESS_EVERY = 50         # 每处理多少个物体打印一次进度
+MAX_MESH_VERTICES = 300000  # 单个网格顶点上限，超过则跳过精确采样
+MAX_MESH_TRIANGLES = 300000  # 单个网格三角上限
+MAX_GEOMETRY_VERTICES = 800000  # 单个物体的几何顶点总预算
+MAX_GEOMETRY_TRIANGLES = 800000  # 单个物体的三角总预算
+TRACE_LOG = True            # 写入逐物体轨迹日志，崩溃后可定位到具体物体
 
 _ID_LEVELS = 43             # 43^3 个颜色；0 和末号保留，其余分配给目标
 _DEFAULT_CAMERAS = ("frontShape", "sideShape", "topShape")
@@ -394,13 +401,66 @@ def _bbox_definitely_outside(points, frustum):
 
 
 # ---------------- 当前帧表面几何 ----------------
+_TRACE_HANDLE = None
+
+
+def _trace_start():
+    global _TRACE_HANDLE
+    if not TRACE_LOG:
+        return
+    try:
+        path = os.path.join(tempfile.gettempdir(),
+                            "invisible_scan_trace.log")
+        _TRACE_HANDLE = open(path, "w", buffering=1)
+        print("逐物体轨迹日志：%s" % path)
+    except Exception:
+        _TRACE_HANDLE = None
+
+
+def _trace(message):
+    if _TRACE_HANDLE is None:
+        return
+    try:
+        _TRACE_HANDLE.write(message + "\n")
+    except Exception:
+        pass
+
+
+def _trace_stop():
+    global _TRACE_HANDLE
+    if _TRACE_HANDLE is not None:
+        try:
+            _TRACE_HANDLE.close()
+        except Exception:
+            pass
+        _TRACE_HANDLE = None
+
+
 def _target_geometry(target):
-    """读取当前帧几何；由调用方用完即释放，避免缓存全部物体撑爆内存。"""
+    """读取当前帧几何；由调用方用完即释放，避免缓存全部物体撑爆内存。
+
+    超大网格直接返回 None：继续读取可能瞬间耗尽内存并让 Maya 崩溃，
+    调用方会把这类物体按“无法确认、保留”处理。
+    """
     geometry = []
+    total_vertices = 0
+    total_triangles = 0
     for shape in _mesh_shapes(target):
         fn = om.MFnMesh(_to_dag_path(shape))
+        vertex_count = fn.numVertices
+        if vertex_count == 0 or fn.numPolygons == 0:
+            continue
+        if (vertex_count > MAX_MESH_VERTICES
+                or fn.numPolygons > MAX_MESH_TRIANGLES):
+            return None
+        total_vertices += vertex_count
+        if total_vertices > MAX_GEOMETRY_VERTICES:
+            return None
         vertices = list(fn.getPoints(om.MSpace.kWorld))
         _counts, indices = fn.getTriangles()
+        total_triangles += len(indices) // 3
+        if total_triangles > MAX_GEOMETRY_TRIANGLES:
+            return None
         indices = array("i", indices)  # 每索引 4 字节，避免 Python int 列表爆内存
         if len(indices) % 3:
             raise RuntimeError("三角索引损坏：" + shape)
@@ -708,8 +768,18 @@ def _occlusion_points(geometry, frustum, evidence):
 
 
 def _sampling_invisible(cam_shapes, frames, targets, progress=None):
+    """带轨迹日志的采样判定入口，崩溃后可查看最后一个物体。"""
+    _trace_start()
+    try:
+        return _sample_targets(cam_shapes, frames, targets, progress)
+    finally:
+        _trace_stop()
+
+
+def _sample_targets(cam_shapes, frames, targets, progress=None):
     remaining = set(targets)
     unresolved = []
+    skipped = []
     total_units = max(1, len(frames) * len(targets))
     started = time.time()
     for frame_index, frame in enumerate(frames):
@@ -720,14 +790,22 @@ def _sampling_invisible(cam_shapes, frames, targets, progress=None):
         occluder_index = _OccluderIndex(occluders) if OCCLUSION else None
         pending = [t for t in targets if t in remaining]
         base = frame_index * len(targets)
+        _trace("帧 %s 开始，待判定 %d" % (frame, len(pending)))
 
         for count, target in enumerate(pending, 1):
             geometry = None
+            _trace("帧 %s 物体 %s" % (frame, target))
             try:
                 if not _target_visible(target):
                     continue  # 当前帧隐藏；仍可能在其他帧可见
                 bbox = _bbox_points(target)  # 每帧每物体只取一次
                 geometry = _target_geometry(target)
+                if geometry is None:
+                    # 超大网格不读取，按“无法确认、保留”处理，避免内存崩溃。
+                    remaining.discard(target)
+                    skipped.append(target)
+                    _trace("跳过超大网格：%s" % target)
+                    continue
                 visible = False
                 for _camera, frustum in frustums:
                     evidence, uncertain = _frustum_evidence(
@@ -767,6 +845,11 @@ def _sampling_invisible(cam_shapes, frames, targets, progress=None):
 
     if progress is not None:
         progress(100, total_units, total_units, time.time() - started)
+    if skipped:
+        print("网格过大、无法精确判定（已按可见保留）%d 个：" % len(skipped))
+        for target in skipped[:50]:
+            print("   ", target)
+        _trace("超大网格跳过 %d 个" % len(skipped))
     return [t for t in targets if t in remaining], unresolved
 
 
