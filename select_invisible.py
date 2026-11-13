@@ -358,8 +358,21 @@ def _clip_triangle(triangle, frustum):
     return polygon
 
 
+def _bounds(node):
+    """世界空间包围盒；对象无效或无包围盒时返回 None，不抛错。"""
+    if not node or not cmds.objExists(node):
+        return None
+    try:
+        bb = cmds.exactWorldBoundingBox(node)
+    except Exception:
+        return None
+    if not bb or len(bb) != 6:
+        return None
+    return tuple(float(v) for v in bb)
+
+
 def _bbox_points(obj):
-    bb = cmds.xform(obj, query=True, boundingBox=True, worldSpace=True)
+    bb = _bounds(obj)
     if bb is None:
         return []
     x0, y0, z0, x1, y1, z1 = bb
@@ -471,10 +484,7 @@ def _frustum_evidence(bbox, geometry, frustum, limit):
 
 # ---------------- 遮挡 ----------------
 def _world_bounds(node):
-    bb = cmds.xform(node, query=True, boundingBox=True, worldSpace=True)
-    if not bb or len(bb) != 6:
-        return None
-    return tuple(float(v) for v in bb)
+    return _bounds(node)
 
 
 def _segment_hits_bounds(source, destination, bounds, pad):
@@ -506,14 +516,17 @@ def _segment_hits_bounds(source, destination, bounds, pad):
 def _build_occluders():
     result = []
     for shape in _all_shapes("mesh"):
-        transform = _parent_transform(shape)
-        if any(_short(transform).startswith(prefix)
-               for prefix in EXCLUDE_OCCLUDERS):
-            continue
-        if not _visible_to_camera(shape):
-            continue
-        result.append((om.MFnMesh(_to_dag_path(shape)), shape, transform,
-                       _world_bounds(shape)))
+        try:
+            transform = _parent_transform(shape)
+            if any(_short(transform).startswith(prefix)
+                   for prefix in EXCLUDE_OCCLUDERS):
+                continue
+            if not _visible_to_camera(shape):
+                continue
+            result.append((om.MFnMesh(_to_dag_path(shape)), shape, transform,
+                           _world_bounds(shape)))
+        except Exception:
+            continue  # 单个异常网格不影响整体判定
     return result
 
 
@@ -706,6 +719,23 @@ def _editor_flags():
     }
 
 
+def _view_camera(view):
+    """兼容 API 2.0 的 getCamera() 与旧版 camera()。"""
+    for name in ("getCamera", "camera"):
+        getter = getattr(view, name, None)
+        if getter is None:
+            continue
+        try:
+            return getter()
+        except Exception:
+            continue
+    return None
+
+
+def _camera_object(cam_shape):
+    return _to_dag_path(cam_shape).node()
+
+
 def _pixel_exact_invisible(cam_shapes, frames, targets):
     """成功时返回不可见列表；视口条件不满足时返回 None。"""
     snapshots = {}
@@ -723,7 +753,9 @@ def _pixel_exact_invisible(cam_shapes, frames, targets):
             import maya.api.OpenMayaUI as omui
             view = omui.M3dView.active3dView()
             panel = cmds.playblast(activeEditor=True)
-            original_camera = view.camera()
+            original_camera = _view_camera(view)
+            if original_camera is None:
+                raise RuntimeError("无法读取视口当前镜头")
         except Exception as exc:
             raise _PixelUnavailable("需要活动 Maya 3D 视口：%s" % exc)
 
@@ -778,10 +810,13 @@ def _pixel_exact_invisible(cam_shapes, frames, targets):
 
             for camera in cam_shapes:
                 try:
-                    view.setCamera(_to_dag_path(camera))
+                    view.setCamera(_camera_object(camera))
                     view.refresh()
                     image = om.MImage()
-                    view.readColorBuffer(image, False)
+                    try:
+                        view.readColorBuffer(image, False)
+                    except TypeError:
+                        view.readColorBuffer(image)
                     width, height = image.getSize()
                     pixels = image.pixels()
                     if width <= 0 or height <= 0 or len(pixels) < width * height * 4:
