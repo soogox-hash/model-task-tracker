@@ -45,7 +45,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.2.8"           # 用于确认当前加载的是哪份脚本
+VERSION = "1.2.9"           # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -848,21 +848,23 @@ def _closest_hit(fn, origin, direction, distance):
     global _HIT_MODE
     ids, points = _hit_arrays()
     calls = (
-        # 你这版：第 3 个参数是整型空间枚举，至少 5 个位置参数
+        # 你这版：第 3 个参数是整型空间枚举，至少 5 个位置参数。
+        # 最后一位 True = 双面求交：视口按双面着色，法线翻转或单面
+        # 的遮挡体照样挡光，射线也必须双面才算得到同样的遮挡关系。
         lambda: fn.closestIntersection(origin, direction, om.MSpace.kWorld,
-                                       distance, False),
+                                       distance, True),
         lambda: fn.closestIntersection(origin, direction, om.MSpace.kWorld,
                                        distance),
         # 标准 API 2.0：faceIds / points 必须是数组
         lambda: fn.closestIntersection(origin, direction, ids, points,
-                                       om.MSpace.kWorld, distance, False),
+                                       om.MSpace.kWorld, distance, True),
         lambda: fn.closestIntersection(origin, direction, ids, points,
                                        om.MSpace.kWorld, distance),
         # 关键字形式
         lambda: fn.closestIntersection(origin, direction,
                                        space=om.MSpace.kWorld,
                                        maxParam=distance,
-                                       testBothDirections=False),
+                                       testBothDirections=True),
         lambda: fn.closestIntersection(origin, direction),
     )
     if _HIT_MODE is not None:
@@ -926,7 +928,9 @@ def _screen_ratio(point, frustum):
     top = max(abs(frustum["top"]), 1e-9)
     if frustum["ortho"]:
         return c[0] / right, c[1] / top
-    depth = -c[2]
+    # _camera_point 已经把深度取成正数（-p.z），这里不能再取反，
+    # 否则所有点都会落到“在相机背后”的哨兵值 9.9。
+    depth = c[2]
     if depth <= 1e-9:
         return 9.9, 9.9
     return c[0] / depth / right, c[1] / depth / top
