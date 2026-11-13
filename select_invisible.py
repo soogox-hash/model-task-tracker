@@ -45,7 +45,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.2.3"           # 用于确认当前加载的是哪份脚本
+VERSION = "1.2.4"           # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -1470,6 +1470,15 @@ def _report(invisible, unresolved, occluded=()):
         print("没有发现可确认的始终不可见物体。")
     if unresolved:
         print("另有 %d 个物体无法判定，请查看上方原因。" % len(unresolved))
+    # 日志最下方再打一条汇总，方便直接在脚本编辑器里看最终结果。
+    blocked_set = set(occluded or ())
+    outside_n = len([t for t in invisible if t not in blocked_set])
+    blocked_n = len(invisible) - outside_n
+    print("-" * 52)
+    print("最终结果：始终不可见 %d 个（画面外 %d 个红色 / 被遮挡 %d 个紫色），"
+          "无法判定 %d 个"
+          % (len(invisible), outside_n, blocked_n, len(unresolved)))
+    print("-" * 52)
 
 
 def _notify(title, message):
