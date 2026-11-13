@@ -53,6 +53,7 @@ EXACT_FRUSTUM = True        # 快路径未命中时执行三角形/视锥精确�
 OCCLUSION = True            # 是否做遮挡判定
 PIXEL_EXACT = False         # 视口 ID-Buffer；需要 Maya GUI
 EXCLUDE_OCCLUDERS = ()      # 采样模式下不算遮挡体的物体名前缀
+DEBUG_VISIBLE = False       # True = 打印“为什么算可见”的屏幕坐标证据
 RAY_EPSILON = 0.01          # 遮挡射线端点容差（场景单位）
 PIXEL_TOLERANCE = 1         # ID 缓冲每通道允许的 8-bit 误差
 EXACT_TRIANGLE_BUDGET = 200000  # 单物体精确视锥裁剪的三角形上限
@@ -764,6 +765,26 @@ def _ray_source(point, frustum):
         depth - frustum["near"], 0.0)
 
 
+def _screen_ratio(point, frustum):
+    """采样点的归一化画面坐标；|x|、|y| <= 1 表示在画面内。"""
+    c = _camera_point(point, frustum)
+    right = max(abs(frustum["right"]), 1e-9)
+    top = max(abs(frustum["top"]), 1e-9)
+    if frustum["ortho"]:
+        return c[0] / right, c[1] / top
+    depth = -c[2]
+    if depth <= 1e-9:
+        return 9.9, 9.9
+    return c[0] / depth / right, c[1] / depth / top
+
+
+def _debug_visible(target, frame, frustum, point):
+    sx, sy = _screen_ratio(point, frustum)
+    print("[可见证据] %s | 镜头 %s | 帧 %g | 屏幕坐标 (%.2f, %.2f)"
+          "  1.0 = 画面边缘" % (target, frustum["name"].split("|")[-1],
+                               frame, sx, sy))
+
+
 def _occlusion_points(geometry, frustum, evidence):
     points = list(evidence[:SAMPLES_PER_OBJ])
     remaining = SAMPLES_PER_OBJ - len(points)
@@ -837,12 +858,19 @@ def _sample_targets(cam_shapes, frames, targets, progress=None):
                         continue
                     if not OCCLUSION:
                         visible = True
+                        if DEBUG_VISIBLE:
+                            _debug_visible(target, frame, frustum,
+                                           evidence[0])
                         break
                     points = _occlusion_points(geometry, frustum, evidence)
-                    if any(not _ray_blocked(_ray_source(p, frustum), p,
-                                            occluder_index, target)
-                           for p in points):
+                    hit = next(
+                        (p for p in points
+                         if not _ray_blocked(_ray_source(p, frustum), p,
+                                             occluder_index, target)), None)
+                    if hit is not None:
                         visible = True
+                        if DEBUG_VISIBLE:
+                            _debug_visible(target, frame, frustum, hit)
                         break
                 if uncertain_target:
                     remaining.discard(target)
