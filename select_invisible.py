@@ -32,6 +32,7 @@ PIXEL_EXACT 保留原参数名，但实际是“视口 ID-Buffer 模式”：逐
 目标过多或需要独立排除透明遮挡体时，会安全退回采样模式。
 """
 import math
+import time
 from array import array
 
 import maya.cmds as cmds
@@ -530,6 +531,121 @@ def _build_occluders():
     return result
 
 
+class _OccluderIndex(object):
+    """均匀网格：沿射线只取穿过格子里的遮挡体，避免遍历全场景。"""
+
+    def __init__(self, occluders, resolution=48):
+        self.items = [o for o in occluders if o[3] is not None]
+        self.cells = {}
+        self.origin = (0.0, 0.0, 0.0)
+        self.cell = 1.0
+        self.low = (0.0, 0.0, 0.0)
+        self.high = (0.0, 0.0, 0.0)
+        self.max_steps = resolution * 4
+        if not self.items:
+            return
+
+        xs = [o[3][0] for o in self.items] + [o[3][3] for o in self.items]
+        ys = [o[3][1] for o in self.items] + [o[3][4] for o in self.items]
+        zs = [o[3][2] for o in self.items] + [o[3][5] for o in self.items]
+        low = (min(xs), min(ys), min(zs))
+        high = (max(xs), max(ys), max(zs))
+        diagonal = math.sqrt(sum((high[i] - low[i]) ** 2 for i in range(3)))
+        self.origin = low
+        self.low = low
+        self.high = high
+        self.cell = max(diagonal / float(resolution), 1e-4)
+
+        for item_index, item in enumerate(self.items):
+            bb = item[3]
+            start = [int(math.floor((bb[i] - low[i]) / self.cell))
+                     for i in range(3)]
+            end = [int(math.floor((bb[i + 3] - low[i]) / self.cell))
+                   for i in range(3)]
+            for x in range(start[0], end[0] + 1):
+                for y in range(start[1], end[1] + 1):
+                    for z in range(start[2], end[2] + 1):
+                        self.cells.setdefault((x, y, z), []).append(
+                            item_index)
+
+    def _clip_to_scene(self, source, destination):
+        """把线段裁剪到遮挡体总包围盒内，返回 (t0, t1)。"""
+        origin = (source.x, source.y, source.z)
+        vector = (destination.x - origin[0], destination.y - origin[1],
+                  destination.z - origin[2])
+        t0, t1 = 0.0, 1.0
+        for axis in range(3):
+            if abs(vector[axis]) < 1e-12:
+                if (origin[axis] < self.low[axis]
+                        or origin[axis] > self.high[axis]):
+                    return None
+                continue
+            first = (self.low[axis] - origin[axis]) / vector[axis]
+            second = (self.high[axis] - origin[axis]) / vector[axis]
+            if first > second:
+                first, second = second, first
+            t0 = max(t0, first)
+            t1 = min(t1, second)
+            if t0 > t1:
+                return None
+        return t0, t1
+
+    def _cells_on_segment(self, source, destination):
+        clipped = self._clip_to_scene(source, destination)
+        if clipped is None:
+            return
+        t0, t1 = clipped
+        ox, oy, oz = self.origin
+        cell = self.cell
+        sx = (source.x + (destination.x - source.x) * t0 - ox) / cell
+        sy = (source.y + (destination.y - source.y) * t0 - oy) / cell
+        sz = (source.z + (destination.z - source.z) * t0 - oz) / cell
+        ex = (source.x + (destination.x - source.x) * t1 - ox) / cell
+        ey = (source.y + (destination.y - source.y) * t1 - oy) / cell
+        ez = (source.z + (destination.z - source.z) * t1 - oz) / cell
+        dx, dy, dz = ex - sx, ey - sy, ez - sz
+
+        ix, iy, iz = int(math.floor(sx)), int(math.floor(sy)), int(
+            math.floor(sz))
+        step_x = 1 if dx > 0 else -1
+        step_y = 1 if dy > 0 else -1
+        step_z = 1 if dz > 0 else -1
+        infinity = float("inf")
+        delta_x = abs(1.0 / dx) if dx else infinity
+        delta_y = abs(1.0 / dy) if dy else infinity
+        delta_z = abs(1.0 / dz) if dz else infinity
+        max_x = ((ix + (1 if dx > 0 else 0)) - sx) / dx if dx else infinity
+        max_y = ((iy + (1 if dy > 0 else 0)) - sy) / dy if dy else infinity
+        max_z = ((iz + (1 if dz > 0 else 0)) - sz) / dz if dz else infinity
+
+        for _step in range(self.max_steps):
+            yield ix, iy, iz
+            if max_x >= 1.0 and max_y >= 1.0 and max_z >= 1.0:
+                return
+            if max_x <= max_y and max_x <= max_z:
+                ix += step_x
+                max_x += delta_x
+            elif max_y <= max_z:
+                iy += step_y
+                max_y += delta_y
+            else:
+                iz += step_z
+                max_z += delta_z
+
+    def candidates(self, source, destination):
+        if not self.cells:
+            return ()
+        seen = set()
+        result = []
+        for key in self._cells_on_segment(source, destination):
+            for item_index in self.cells.get(key, ()):
+                if item_index in seen:
+                    continue
+                seen.add(item_index)
+                result.append(self.items[item_index])
+        return result
+
+
 def _hit_distance(hit, source):
     """兼容不同返回顺序，取命中点到射线起点的距离。"""
     if not hit:
@@ -544,16 +660,16 @@ def _hit_distance(hit, source):
     return None
 
 
-def _ray_blocked(source, destination, occluders, skip_transform):
+def _ray_blocked(source, destination, index, skip_transform):
     direction = om.MVector(destination - source)
     distance = direction.length()
     if distance <= RAY_EPSILON:
         return False
     direction.normalize()
-    for fn, shape, transform, bounds in occluders:
+    for fn, shape, transform, bounds in index.candidates(source, destination):
         if transform == skip_transform:
             continue
-        # 先用包围盒剔除，避免对全场景网格逐个做射线求交。
+        # 网格只是缩小候选集，仍需包围盒确认线段确实穿过它。
         if not _segment_hits_bounds(source, destination, bounds, RAY_EPSILON):
             continue
         try:
@@ -591,17 +707,21 @@ def _occlusion_points(geometry, frustum, evidence):
     return points
 
 
-def _sampling_invisible(cam_shapes, frames, targets):
+def _sampling_invisible(cam_shapes, frames, targets, progress=None):
     remaining = set(targets)
     unresolved = []
-    for frame in frames:
+    total_units = max(1, len(frames) * len(targets))
+    started = time.time()
+    for frame_index, frame in enumerate(frames):
         cmds.currentTime(frame)
         # 镜头位置和朝向必须在此帧重新求值，不能复用其他帧的矩阵。
         frustums = [(cam, _cam_frustum(cam)) for cam in cam_shapes]
         occluders = _build_occluders() if OCCLUSION else []
+        occluder_index = _OccluderIndex(occluders) if OCCLUSION else None
         pending = [t for t in targets if t in remaining]
+        base = frame_index * len(targets)
 
-        for index, target in enumerate(pending, 1):
+        for count, target in enumerate(pending, 1):
             geometry = None
             try:
                 if not _target_visible(target):
@@ -623,7 +743,7 @@ def _sampling_invisible(cam_shapes, frames, targets):
                         break
                     points = _occlusion_points(geometry, frustum, evidence)
                     if any(not _ray_blocked(_ray_source(p, frustum), p,
-                                            occluders, target)
+                                            occluder_index, target)
                            for p in points):
                         visible = True
                         break
@@ -635,15 +755,18 @@ def _sampling_invisible(cam_shapes, frames, targets):
                 unresolved.append((target, str(exc)))
             finally:
                 geometry = None  # 立即释放当前物体的几何数据
-
-            if index % PROGRESS_EVERY == 0:
-                print("  帧 %g 进度 %d/%d，剩余待判定 %d" %
-                      (frame, index, len(pending), len(remaining)))
+                if progress is not None:
+                    done = base + count
+                    progress(int(done * 100.0 / total_units), done,
+                             total_units, time.time() - started)
 
         print("帧 %g：待判定 %d，无法判定 %d" %
               (frame, len(remaining), len(unresolved)))
         if not remaining:
             break
+
+    if progress is not None:
+        progress(100, total_units, total_units, time.time() - started)
     return [t for t in targets if t in remaining], unresolved
 
 
@@ -909,7 +1032,7 @@ def _notify(title, message):
         pass
 
 
-def _run_detection(cam_shapes, targets, frames):
+def _run_detection(cam_shapes, targets, frames, progress=None):
     """按已统计好的镜头、物体、帧执行判定，并恢复原始时间。"""
     _validate_options(targets)
     original_time = cmds.currentTime(query=True)
@@ -923,7 +1046,9 @@ def _run_detection(cam_shapes, targets, frames):
 
         if invisible is None:
             invisible, unresolved = _sampling_invisible(
-                cam_shapes, frames, targets)
+                cam_shapes, frames, targets, progress)
+        elif progress is not None:
+            progress(100, 1, 1, 0.0)
         _report(invisible, unresolved)
         return invisible
     finally:
@@ -966,6 +1091,54 @@ _CHECK_OCCLUSION = "iofOcclusionCheck"
 _CHECK_EXACT = "iofExactCheck"
 _CHECK_PIXEL = "iofPixelCheck"
 _INFO = "iofInfoText"
+_PROGRESS_BAR = "iofProgressBar"
+_PROGRESS_TEXT = "iofProgressText"
+_BUTTON_START = "iofStartButton"
+
+
+def _format_seconds(seconds):
+    seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return "%d 小时 %d 分" % (hours, minutes)
+    if minutes:
+        return "%d 分 %d 秒" % (minutes, secs)
+    return "%d 秒" % secs
+
+
+def _set_progress(percent, elapsed):
+    percent = max(0, min(100, int(percent)))
+    if percent >= 100:
+        eta = "0 秒"
+    elif percent > 0 and elapsed > 0.2:
+        eta = _format_seconds(elapsed * (100.0 - percent) / percent)
+    else:
+        eta = "计算中…"
+    label = "进度 %d%%    已用 %s    预计剩余 %s" % (
+        percent, _format_seconds(elapsed), eta)
+    try:
+        cmds.progressBar(_PROGRESS_BAR, edit=True, progress=percent)
+        cmds.text(_PROGRESS_TEXT, edit=True, label=label)
+        cmds.refresh(force=True)
+    except Exception:
+        pass  # 窗口被关闭时静默继续
+
+
+def _make_progress():
+    """返回带节流的进度回调，避免每个物体都刷新界面。"""
+    state = {"percent": -1, "time": 0.0}
+
+    def update(percent, done, total, elapsed):
+        percent = max(0, min(100, int(percent)))
+        now = time.time()
+        if percent == state["percent"] and now - state["time"] < 0.4:
+            return
+        state["percent"] = percent
+        state["time"] = now
+        _set_progress(percent, elapsed)
+
+    return update
 
 
 def _frame_field(field):
@@ -1015,11 +1188,22 @@ def _ui_start(*_args):
         cmds.warning("场景里没有可判定的网格模型")
         return
 
+    update = _make_progress()
+    _set_progress(0, 0.0)
     try:
-        return _run_detection(cam_shapes, targets, frames)
+        cmds.button(_BUTTON_START, edit=True, enable=False)
+    except Exception:
+        pass
+    try:
+        return _run_detection(cam_shapes, targets, frames, update)
     except Exception as exc:
         cmds.warning("不可见物体判定已中止：%s" % exc)
         return []
+    finally:
+        try:
+            cmds.button(_BUTTON_START, edit=True, enable=True)
+        except Exception:
+            pass
 
 
 def show_ui(*_args):
@@ -1027,7 +1211,7 @@ def show_ui(*_args):
     if cmds.window(_WINDOW, exists=True):
         cmds.deleteUI(_WINDOW)
 
-    cmds.window(_WINDOW, title="不可见物体检测", widthHeight=(380, 330),
+    cmds.window(_WINDOW, title="不可见物体检测", widthHeight=(380, 390),
                 sizeable=False)
     cmds.columnLayout(adjustableColumn=True, rowSpacing=8,
                       columnAttach=("both", 10))
@@ -1046,11 +1230,14 @@ def show_ui(*_args):
     cmds.checkBox(_CHECK_PIXEL, label="视口 ID-Buffer（需 GUI）",
                   value=PIXEL_EXACT)
     cmds.text(_INFO, label="点击「开始」后统计场景数据", align="left")
+    cmds.progressBar(_PROGRESS_BAR, minValue=0, maxValue=100, height=16)
+    cmds.text(_PROGRESS_TEXT, label="进度 0%    已用 0 秒    预计剩余 --",
+              align="left")
 
     cmds.rowColumnLayout(numberOfColumns=2,
                          columnWidth=[(1, 168), (2, 168)],
                          columnSpacing=[(1, 6)])
-    cmds.button(label="开始", height=32, command=_ui_start)
+    cmds.button(_BUTTON_START, label="开始", height=32, command=_ui_start)
     cmds.button(label="关闭", height=32,
                 command=lambda *_: cmds.deleteUI(_WINDOW))
     cmds.setParent("..")
