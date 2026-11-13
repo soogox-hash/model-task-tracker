@@ -236,7 +236,9 @@ def _cam_frustum(cam_shape):
     far = float(fn.farClippingPlane)
     width = float(cmds.getAttr("defaultResolution.width"))
     height = float(cmds.getAttr("defaultResolution.height"))
-    pixel_aspect = float(cmds.getAttr("defaultResolution.pixelAspectRatio"))
+    pixel_aspect = 1.0
+    if cmds.objExists("defaultResolution.pixelAspect"):
+        pixel_aspect = float(cmds.getAttr("defaultResolution.pixelAspect"))
     if width <= 0 or height <= 0 or pixel_aspect <= 0:
         raise RuntimeError("渲染分辨率或像素宽高比无效")
     # getFilmFrustum 返回尺寸/偏移，并非左右上下边界；渲染视锥才直接
