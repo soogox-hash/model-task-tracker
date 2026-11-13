@@ -45,7 +45,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.2.1"           # 用于确认当前加载的是哪份脚本
+VERSION = "1.2.2"           # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -1727,8 +1727,8 @@ def _set_progress(percent, elapsed):
     label = "进度 %d%%    已用 %s    预计剩余 %s" % (
         percent, _format_seconds(elapsed), eta)
     try:
-        # 用同高度的占位文字顶住进度条的位置，窗口高度不随显隐变化。
-        cmds.text(_PROGRESS_SPACER, edit=True, visible=False)
+        # 用同高度的占位条顶住进度条的位置，窗口高度不随显隐变化。
+        cmds.separator(_PROGRESS_SPACER, edit=True, visible=False)
         cmds.progressBar(_PROGRESS_BAR, edit=True, progress=percent,
                          visible=True)
         cmds.text(_PROGRESS_TEXT, edit=True, label=label, visible=True)
@@ -1761,6 +1761,39 @@ def _fit_window():
             layout.setSizeConstraint(QtWidgets.QLayout.SetFixedSize)
             layout.activate()
         window.adjustSize()
+    except Exception:
+        pass
+
+
+def _lock_progress_height():
+    """把占位条和进度条锁成同一像素高度，确保显隐时窗口高度不变。"""
+    try:
+        from maya import OpenMayaUI as omui
+        from shiboken6 import wrapInstance
+        from PySide6 import QtWidgets
+    except Exception:
+        try:
+            from maya import OpenMayaUI as omui
+            from shiboken2 import wrapInstance
+            from PySide2 import QtWidgets
+        except Exception:
+            return
+    try:
+        bar_ptr = omui.MQtUtil.findControl(_PROGRESS_BAR)
+        spacer_ptr = omui.MQtUtil.findControl(_PROGRESS_SPACER)
+        if not bar_ptr or not spacer_ptr:
+            return
+        bar = wrapInstance(int(bar_ptr), QtWidgets.QWidget)
+        spacer = wrapInstance(int(spacer_ptr), QtWidgets.QWidget)
+        # 隐藏时取 sizeHint，避免先把进度条显示出来。
+        height = max(bar.sizeHint().height(),
+                     bar.minimumSizeHint().height())
+        if height < 8:
+            print("[iof] 未测得进度条高度，保持默认 20 px")
+            return
+        bar.setFixedHeight(height)
+        spacer.setFixedHeight(height)
+        print("[iof] 进度条与占位高度已锁定：%d px" % height)
     except Exception:
         pass
 
@@ -2123,7 +2156,7 @@ def _ui_start(*_args):
     try:
         cmds.progressBar(_PROGRESS_BAR, edit=True, visible=False)
         cmds.text(_PROGRESS_TEXT, edit=True, label=" ")
-        cmds.text(_PROGRESS_SPACER, edit=True, visible=True)
+        cmds.separator(_PROGRESS_SPACER, edit=True, visible=True)
     except Exception:
         pass
     if invisible:
@@ -2147,7 +2180,7 @@ def show_ui(*_args):
     except Exception:
         pass
 
-    cmds.window(_WINDOW, title="镜头内物体检测", width=380,
+    cmds.window(_WINDOW, title="镜头内物体检测 v%s" % VERSION, width=380,
                 resizeToFitChildren=True, sizeable=False,
                 closeCommand=_stop_frame_follow)
     cmds.columnLayout(adjustableColumn=True, rowSpacing=8,
@@ -2199,9 +2232,9 @@ def show_ui(*_args):
                   height=24, width=172,
                   annotation="逐像素精确判定，需要 Maya GUI 会话")
     cmds.setParent("..")
-    # 进度条默认隐藏；用同高度的占位文字顶住它的位置，
+    # 进度条默认隐藏；用同高度的占位条顶住它的位置，
     # 开始后隐藏占位、显示进度条，窗口高度始终不变。
-    cmds.text(_PROGRESS_SPACER, label=" ", height=20)
+    cmds.separator(_PROGRESS_SPACER, style="none", height=20)
     cmds.progressBar(_PROGRESS_BAR, minValue=0, maxValue=100,
                      height=20, visible=False)
     cmds.rowColumnLayout(numberOfColumns=7,
@@ -2224,6 +2257,7 @@ def show_ui(*_args):
     _refresh_cameras()
     _start_frame_follow()
     cmds.showWindow(_WINDOW)
+    _lock_progress_height()
     _fit_window()
 
 
