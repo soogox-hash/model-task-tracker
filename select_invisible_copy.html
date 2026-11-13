@@ -44,7 +44,7 @@
 <body>
 <header>
   <span class="title">select_invisible.py</span>
-  <span class="meta">1686 行 · 60.8 KB · Maya 2020+ / Python 3</span>
+  <span class="meta">1650 行 · 59.6 KB · Maya 2020+ / Python 3</span>
   <span class="spacer"></span>
   <button id="copy">复制代码</button>
   <button id="download" class="ghost">下载 .py</button>
@@ -1380,50 +1380,6 @@ def _close_ui(*_args):
         cmds.deleteUI(_WINDOW)
 
 
-def _style_round_button(name, primary=True):
-    """把 Maya 原生按钮替换为圆角样式；取不到 Qt 时保持默认外观。"""
-    try:
-        from maya import OpenMayaUI as omui
-    except Exception:
-        return
-    try:
-        from shiboken2 import wrapInstance
-        from PySide2 import QtWidgets
-    except Exception:
-        try:
-            from shiboken6 import wrapInstance
-            from PySide6 import QtWidgets
-        except Exception:
-            return
-    try:
-        pointer = omui.MQtUtil.findControl(name)
-        if not pointer:
-            return
-        widget = wrapInstance(int(pointer), QtWidgets.QPushButton)
-        if primary:
-            css = (
-                "QPushButton {background-color:#2563eb; color:#ffffff;"
-                " border:none; border-radius:10px; font-size:13px;}"
-                "QPushButton:hover {background-color:#3b82f6;}"
-                "QPushButton:pressed {background-color:#1d4ed8;}")
-        else:
-            css = (
-                "QPushButton {background-color:#ffffff; color:#1f2328;"
-                " border:1px solid #d0d5dd; border-radius:10px;"
-                " font-size:13px;}"
-                "QPushButton:hover {background-color:#f2f4f7;}"
-                "QPushButton:pressed {background-color:#e4e7ec;}")
-        widget.setStyleSheet(css)
-    except Exception:
-        pass
-
-
-def _round_button(name, label, command, primary=True, width=150):
-    cmds.button(name, label=label, height=34, width=width, command=command)
-    _style_round_button(name, primary)
-    return name
-
-
 def _camera_label(shape):
     """列表显示大纲里的节点名（相机 transform），不带 Shape 后缀。"""
     parents = cmds.listRelatives(shape, parent=True) or []
@@ -1674,12 +1630,15 @@ def show_ui(*_args):
     cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
     cmds.textScrollList(_CAMERA_LIST, numberOfRows=6, height=96,
                         allowMultiSelection=True)
-    cmds.rowColumnLayout(numberOfColumns=3,
-                         columnWidth=[(1, 108), (2, 108), (3, 108)],
-                         columnSpacing=[(1, 5), (2, 5)])
-    cmds.button(label="全选", height=24, command=_select_all_cameras)
-    cmds.button(label="全不选", height=24, command=_select_no_cameras)
-    cmds.button(label="刷新", height=24, command=_refresh_cameras)
+    cmds.rowColumnLayout(numberOfColumns=5,
+                         columnWidth=[(1, 14), (2, 96), (3, 96),
+                                      (4, 96), (5, 14)],
+                         columnSpacing=[(1, 8), (2, 8), (3, 8), (4, 8)])
+    cmds.button(label="全选", height=24, width=96,
+                command=_select_all_cameras)
+    cmds.button(label="全不选", height=24, width=96,
+                command=_select_no_cameras)
+    cmds.button(label="刷新", height=24, width=96, command=_refresh_cameras)
     cmds.setParent("..")
     cmds.setParent("..")
     cmds.setParent("..")
@@ -1714,18 +1673,23 @@ def show_ui(*_args):
     cmds.setParent("..")
     cmds.setParent("..")
     cmds.setParent("..")
+    cmds.text(_INFO, label="点击「开始」后统计场景数据", align="center")
+    # 进度条默认隐藏，但保留固定高度的容器，开始后出现时界面不跳动。
+    cmds.frameLayout(_PROGRESS_BOX, height=26, borderVisible=False,
+                     labelVisible=False, collapsable=False)
+    cmds.rowColumnLayout(numberOfColumns=3,
+                         columnWidth=[(1, 30), (2, 300), (3, 30)])
+    cmds.progressBar(_PROGRESS_BAR, minValue=0, maxValue=100, height=16,
+                     width=300, visible=False)
+    cmds.setParent("..")
+    cmds.setParent("..")
     cmds.rowColumnLayout(numberOfColumns=2,
                          columnWidth=[(1, 150), (2, 150)],
                          columnSpacing=[(1, 24)])
-    _round_button(_BUTTON_START, "开始", _ui_start, primary=True)
-    _round_button(_BUTTON_CLOSE, "关闭", _close_ui, primary=False)
-    cmds.setParent("..")
-    cmds.text(_INFO, label="点击「开始」后统计场景数据", align="center")
-    # 进度条默认隐藏，但保留固定高度的容器，开始后出现时界面不跳动。
-    cmds.frameLayout(_PROGRESS_BOX, height=24, borderVisible=False,
-                     labelVisible=False, collapsable=False)
-    cmds.progressBar(_PROGRESS_BAR, minValue=0, maxValue=100, height=16,
-                     visible=False)
+    cmds.button(_BUTTON_START, label="开始", height=32, width=150,
+                command=_ui_start)
+    cmds.button(_BUTTON_CLOSE, label="关闭", height=32, width=150,
+                command=_close_ui)
     cmds.setParent("..")
     cmds.text(_PROGRESS_TEXT, label="进度 0%    已用 0 秒    预计剩余 --",
               align="center", visible=False)
