@@ -1172,6 +1172,106 @@ def _notify(title, message):
         pass
 
 
+def _frame_span(frames):
+    if not frames:
+        return ""
+    return "，%g 至 %g 帧" % (frames[0], frames[-1])
+
+
+def _check_selected(*_args):
+    """检查当前选中的物体：在每个所选镜头的画面内 / 画面外 / 被遮挡。"""
+    selection = cmds.ls(selection=True, long=True) or []
+    targets = _target_transforms(selection)
+    if not targets:
+        _set_info("检查失败：请先选中要检查的物体")
+        cmds.warning("请先选中要检查的物体，再点「检查选中物体」")
+        return []
+    cam_shapes = _chosen_cameras()
+    if cam_shapes is None:
+        _set_info("检查失败：请至少选择一个镜头")
+        cmds.warning("请至少选择一个镜头（或点击「全选」）")
+        return []
+    try:
+        frames = _sample_frames()
+    except Exception as exc:
+        _set_info("帧范围无效：%s" % exc)
+        return []
+
+    labels = {cam: _camera_label(cam) for cam in cam_shapes}
+    stats = {t: dict((cam, {"inside": [], "clear": [], "blocked": []})
+                     for cam in cam_shapes) for t in targets}
+    unknown = {}
+    original_time = cmds.currentTime(query=True)
+    try:
+        for frame in frames:
+            cmds.currentTime(frame)
+            frustums = [(cam, _cam_frustum(cam)) for cam in cam_shapes]
+            occluders = _build_occluders() if OCCLUSION else []
+            index = _OccluderIndex(occluders) if OCCLUSION else None
+            for target in targets:
+                if not _target_visible(target):
+                    continue
+                bbox = _bbox_points(target)
+                geometry = _target_geometry(target)
+                if geometry is None:
+                    unknown[target] = "网格过大，无法精确判定"
+                    continue
+                for cam, frustum in frustums:
+                    evidence, uncertain = _frustum_evidence(
+                        bbox, geometry, frustum,
+                        SAMPLES_PER_OBJ if OCCLUSION else 1)
+                    if uncertain:
+                        unknown[target] = "三角形超过预算，无法精确判定"
+                        continue
+                    if not evidence:
+                        continue
+                    stats[target][cam]["inside"].append(frame)
+                    if not OCCLUSION:
+                        stats[target][cam]["clear"].append(frame)
+                        continue
+                    points = _occlusion_points(geometry, frustum, evidence)
+                    if any(not _ray_blocked(_ray_source(p, frustum), p,
+                                            index, target) for p in points):
+                        stats[target][cam]["clear"].append(frame)
+                    else:
+                        stats[target][cam]["blocked"].append(frame)
+    finally:
+        try:
+            cmds.currentTime(original_time)
+        except Exception:
+            pass
+
+    lines = []
+    inside_count = 0
+    for target in targets:
+        lines.append("物体 %s" % target)
+        inside_any = False
+        for cam in cam_shapes:
+            data = stats[target][cam]
+            name = labels[cam]
+            if data["clear"]:
+                inside_any = True
+                lines.append("  %s：画面内，未被遮挡 %d/%d 帧%s" %
+                             (name, len(data["clear"]), len(frames),
+                              _frame_span(data["clear"])))
+            elif data["inside"]:
+                inside_any = True
+                lines.append("  %s：画面内，但全部被遮挡 %d/%d 帧" %
+                             (name, len(data["inside"]), len(frames)))
+            else:
+                lines.append("  %s：不在画面内（%d 帧）" %
+                             (name, len(frames)))
+        if target in unknown:
+            lines.append("  注意：%s" % unknown[target])
+        if inside_any:
+            inside_count += 1
+    report = "\n".join(lines)
+    print(report)
+    _set_info("检查完成：%d/%d 个物体在所选镜头的画面内，详见脚本编辑器"
+              % (inside_count, len(targets)))
+    return report
+
+
 def _run_detection(cam_shapes, targets, frames, progress=None):
     """按已统计好的镜头、物体、帧执行判定，并恢复原始时间。"""
     _validate_options(targets)
@@ -1237,6 +1337,7 @@ _PROGRESS_BOX = "iofProgressBox"
 _PROGRESS_FORM = "iofProgressForm"
 _BUTTON_START = "iofStartButton"
 _BUTTON_CLOSE = "iofCloseButton"
+_BUTTON_CHECK = "iofCheckButton"
 _CAMERA_LIST = "iofCameraList"
 _CAMERAS_CACHE = []
 _FRAME_FOLLOW_JOB = None
@@ -1693,6 +1794,13 @@ def show_ui(*_args):
     cmds.text(label="", width=24)
     cmds.button(_BUTTON_CLOSE, label="关闭", height=32, width=150,
                 command=_close_ui)
+    cmds.text(label="", width=10)
+    cmds.setParent("..")
+    cmds.rowColumnLayout(numberOfColumns=3,
+                         columnWidth=[(1, 10), (2, 324), (3, 10)])
+    cmds.text(label="", width=10)
+    cmds.button(_BUTTON_CHECK, label="检查选中物体是否在画面内",
+                height=24, width=324, command=_check_selected)
     cmds.text(label="", width=10)
     cmds.setParent("..")
     cmds.text(_INFO, label="点击「开始」后统计场景数据", align="center")
