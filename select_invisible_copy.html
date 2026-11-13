@@ -44,7 +44,7 @@
 <body>
 <header>
   <span class="title">select_invisible.py</span>
-  <span class="meta">2254 行 · 82.2 KB · Maya 2020+ / Python 3</span>
+  <span class="meta">2232 行 · 81.7 KB · Maya 2020+ / Python 3</span>
   <span class="spacer"></span>
   <button id="copy">复制代码</button>
   <button id="download" class="ghost">下载 .py</button>
@@ -97,7 +97,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.2.0"           # 用于确认当前加载的是哪份脚本
+VERSION = "1.2.1"           # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -1746,6 +1746,7 @@ _CHECK_PIXEL = "iofPixelCheck"
 _INFO = "iofInfoText"
 _PROGRESS_BAR = "iofProgressBar"
 _PROGRESS_TEXT = "iofProgressText"
+_PROGRESS_SPACER = "iofProgressSpacer"
 _BUTTON_START = "iofStartButton"
 _BUTTON_CLOSE = "iofCloseButton"
 _BUTTON_CHECK = "iofCheckButton"
@@ -1778,12 +1779,13 @@ def _set_progress(percent, elapsed):
     label = "进度 %d%%    已用 %s    预计剩余 %s" % (
         percent, _format_seconds(elapsed), eta)
     try:
+        # 用同高度的占位文字顶住进度条的位置，窗口高度不随显隐变化。
+        cmds.text(_PROGRESS_SPACER, edit=True, visible=False)
         cmds.progressBar(_PROGRESS_BAR, edit=True, progress=percent,
                          visible=True)
         cmds.text(_PROGRESS_TEXT, edit=True, label=label, visible=True)
         _trace("界面刷新 %d%%" % percent)
         cmds.refresh(force=True)
-        _fit_window()
     except Exception:
         pass  # 窗口被关闭时静默继续
 
@@ -1811,31 +1813,6 @@ def _fit_window():
             layout.setSizeConstraint(QtWidgets.QLayout.SetFixedSize)
             layout.activate()
         window.adjustSize()
-    except Exception:
-        pass
-
-
-def _reserve_space(control):
-    """让控件隐藏时仍保留占位，避免窗口高度跳动。"""
-    try:
-        from maya import OpenMayaUI as omui
-        from shiboken6 import wrapInstance
-        from PySide6 import QtWidgets
-    except Exception:
-        try:
-            from maya import OpenMayaUI as omui
-            from shiboken2 import wrapInstance
-            from PySide2 import QtWidgets
-        except Exception:
-            return
-    try:
-        pointer = omui.MQtUtil.findControl(control)
-        if not pointer:
-            return
-        widget = wrapInstance(int(pointer), QtWidgets.QWidget)
-        policy = widget.sizePolicy()
-        policy.setRetainSizeWhenHidden(True)
-        widget.setSizePolicy(policy)
     except Exception:
         pass
 
@@ -2172,8 +2149,8 @@ def _ui_start(*_args):
 
     update = _make_progress()
     try:
-        # 开始后隐藏统计信息，让位给进度条与进度文字。
-        cmds.text(_INFO, edit=True, visible=False)
+        # 清空统计信息文字但保留这一行，避免窗口高度跳动。
+        cmds.text(_INFO, edit=True, label=" ")
     except Exception:
         pass
     _set_progress(0, 0.0)
@@ -2194,10 +2171,11 @@ def _ui_start(*_args):
         except Exception:
             pass
 
-    # 结束后收起进度条与进度文字，在按钮下方显示结果。
+    # 结束后收起进度条，恢复同高度占位，保持窗口高度不变。
     try:
         cmds.progressBar(_PROGRESS_BAR, edit=True, visible=False)
-        cmds.text(_PROGRESS_TEXT, edit=True, visible=False)
+        cmds.text(_PROGRESS_TEXT, edit=True, label=" ")
+        cmds.text(_PROGRESS_SPACER, edit=True, visible=True)
     except Exception:
         pass
     if invisible:
@@ -2273,10 +2251,11 @@ def show_ui(*_args):
                   height=24, width=172,
                   annotation="逐像素精确判定，需要 Maya GUI 会话")
     cmds.setParent("..")
-    # 进度条默认隐藏，但保留占位高度，开始后出现时窗口不跳动。
+    # 进度条默认隐藏；用同高度的占位文字顶住它的位置，
+    # 开始后隐藏占位、显示进度条，窗口高度始终不变。
+    cmds.text(_PROGRESS_SPACER, label=" ", height=14)
     cmds.progressBar(_PROGRESS_BAR, minValue=0, maxValue=100,
                      height=14, visible=False)
-    _reserve_space(_PROGRESS_BAR)
     cmds.rowColumnLayout(numberOfColumns=7,
                          columnWidth=[(1, 10), (2, 104), (3, 16),
                                       (4, 104), (5, 16), (6, 104), (7, 10)])
@@ -2292,9 +2271,8 @@ def show_ui(*_args):
     cmds.text(label="", width=10)
     cmds.setParent("..")
     cmds.text(_INFO, label="点击「开始」后统计场景数据", align="center")
-    cmds.text(_PROGRESS_TEXT, label="进度 0%    已用 0 秒    预计剩余 --",
-              align="center", visible=False)
-    _reserve_space(_PROGRESS_TEXT)
+    # 进度文字始终占一行，空闲时用空格占位，开始后显示进度。
+    cmds.text(_PROGRESS_TEXT, label=" ", align="center")
     _refresh_cameras()
     _start_frame_follow()
     cmds.showWindow(_WINDOW)
