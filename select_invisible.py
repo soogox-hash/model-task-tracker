@@ -45,7 +45,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.1.9"           # 用于确认当前加载的是哪份脚本
+VERSION = "1.2.0"           # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -1763,6 +1763,31 @@ def _fit_window():
         pass
 
 
+def _reserve_space(control):
+    """让控件隐藏时仍保留占位，避免窗口高度跳动。"""
+    try:
+        from maya import OpenMayaUI as omui
+        from shiboken6 import wrapInstance
+        from PySide6 import QtWidgets
+    except Exception:
+        try:
+            from maya import OpenMayaUI as omui
+            from shiboken2 import wrapInstance
+            from PySide2 import QtWidgets
+        except Exception:
+            return
+    try:
+        pointer = omui.MQtUtil.findControl(control)
+        if not pointer:
+            return
+        widget = wrapInstance(int(pointer), QtWidgets.QWidget)
+        policy = widget.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        widget.setSizePolicy(policy)
+    except Exception:
+        pass
+
+
 def _set_info(label, color=None):
     """更新按钮下方的信息文字；color 为 None 时恢复默认颜色。"""
     try:
@@ -2196,9 +2221,10 @@ def show_ui(*_args):
                   height=24, width=172,
                   annotation="逐像素精确判定，需要 Maya GUI 会话")
     cmds.setParent("..")
-    # 进度条默认隐藏；直接放在主列里，隐藏时不占额外高度。
+    # 进度条默认隐藏，但保留占位高度，开始后出现时窗口不跳动。
     cmds.progressBar(_PROGRESS_BAR, minValue=0, maxValue=100,
                      height=14, visible=False)
+    _reserve_space(_PROGRESS_BAR)
     cmds.rowColumnLayout(numberOfColumns=7,
                          columnWidth=[(1, 10), (2, 104), (3, 16),
                                       (4, 104), (5, 16), (6, 104), (7, 10)])
@@ -2216,6 +2242,7 @@ def show_ui(*_args):
     cmds.text(_INFO, label="点击「开始」后统计场景数据", align="center")
     cmds.text(_PROGRESS_TEXT, label="进度 0%    已用 0 秒    预计剩余 --",
               align="center", visible=False)
+    _reserve_space(_PROGRESS_TEXT)
     _refresh_cameras()
     _start_frame_follow()
     cmds.showWindow(_WINDOW)
