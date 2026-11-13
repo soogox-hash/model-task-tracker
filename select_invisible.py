@@ -17,7 +17,7 @@
 ------
 * FRAMES 非空时优先使用显式帧列表，支持子帧。
 * 否则检查 FRAME_START 至 FRAME_END（包含首尾），步长为 FRAME_STEP。
-* FRAME_START/END 为 None 时使用播放范围；默认逐整帧检查，不再只查三帧。
+* FRAME_START/END 为 None 时使用当前帧；默认逐整帧检查，不再只查三帧。
 
 判定规则
 --------
@@ -43,8 +43,8 @@ import maya.api.OpenMaya as om
 # ---------------- 可调参数 ----------------
 MARGIN = 1.15               # 视锥放宽系数；>=1 更保守
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
-FRAME_START = None          # 帧范围起点；None = 播放范围起点
-FRAME_END = None            # 帧范围终点；None = 播放范围终点
+FRAME_START = None          # 帧范围起点；None = 当前帧
+FRAME_END = None            # 帧范围终点；None = 当前帧
 FRAME_STEP = 1.0            # 帧步长；检查子帧可设为 0.5、0.25 等
 ONLY_RENDERABLE = False     # 只统计可渲染镜头
 FRUSTUM_SAMPLES = 96        # 视锥快路径的顶点采样上限
@@ -188,10 +188,10 @@ def _sample_frames(start=None, end=None, step=None, frames=None):
 
     start = FRAME_START if start is None else start
     end = FRAME_END if end is None else end
-    start = (cmds.playbackOptions(query=True, minTime=True)
-             if start is None else float(start))
-    end = (cmds.playbackOptions(query=True, maxTime=True)
-           if end is None else float(end))
+    if start is None or end is None:
+        current = float(cmds.currentTime(query=True))
+        start = current if start is None else start
+        end = current if end is None else end
     step = float(FRAME_STEP if step is None else step)
     start, end = float(start), float(end)
     if step <= 0:
@@ -1208,6 +1208,9 @@ _PROGRESS_TEXT = "iofProgressText"
 _BUTTON_START = "iofStartButton"
 _CAMERA_LIST = "iofCameraList"
 _CAMERAS_CACHE = []
+_FRAME_FOLLOW_JOB = None
+_FRAME_FOLLOW = True
+_FRAME_FOLLOW_GUARD = False
 
 
 def _format_seconds(seconds):
@@ -1259,6 +1262,67 @@ def _make_progress():
 def _frame_field(field):
     text = (cmds.textFieldGrp(field, query=True, text=True) or "").strip()
     return float(text) if text else None
+
+
+def _current_frame_text():
+    return "%g" % float(cmds.currentTime(query=True))
+
+
+def _set_frame_fields(start, end):
+    global _FRAME_FOLLOW_GUARD
+    _FRAME_FOLLOW_GUARD = True
+    try:
+        cmds.textFieldGrp(_FIELD_START, edit=True, text=start)
+        cmds.textFieldGrp(_FIELD_END, edit=True, text=end)
+    except Exception:
+        pass
+    finally:
+        _FRAME_FOLLOW_GUARD = False
+
+
+def _frame_fields_follow_current(*_args):
+    """时间轴变化时，未手动改过的起止帧继续等于当前帧。"""
+    if not _FRAME_FOLLOW:
+        return
+    value = _current_frame_text()
+    _set_frame_fields(value, value)
+
+
+def _frame_manual_edit(*_args):
+    """用户改过帧范围后停止跟随，避免把自定义范围冲掉。"""
+    global _FRAME_FOLLOW
+    if not _FRAME_FOLLOW_GUARD:
+        _FRAME_FOLLOW = False
+
+
+def _stop_frame_follow(*_args):
+    global _FRAME_FOLLOW_JOB, _FRAME_FOLLOW
+    _FRAME_FOLLOW = False
+    if _FRAME_FOLLOW_JOB is not None:
+        try:
+            if cmds.scriptJob(exists=_FRAME_FOLLOW_JOB):
+                cmds.scriptJob(kill=_FRAME_FOLLOW_JOB, force=True)
+        except Exception:
+            pass
+        _FRAME_FOLLOW_JOB = None
+
+
+def _start_frame_follow():
+    global _FRAME_FOLLOW_JOB, _FRAME_FOLLOW
+    _stop_frame_follow()
+    _FRAME_FOLLOW = True
+    try:
+        _FRAME_FOLLOW_JOB = cmds.scriptJob(
+            event=["timeChanged", _frame_fields_follow_current],
+            killWithScene=False)
+    except Exception:
+        _FRAME_FOLLOW_JOB = None
+
+
+def _close_ui(*_args):
+    _stop_frame_follow()
+    if cmds.window(_WINDOW, exists=True):
+        cmds.deleteUI(_WINDOW)
 
 
 def _camera_label(shape):
@@ -1414,7 +1478,7 @@ def _ui_start(*_args):
         if FRAME_STEP is None:
             FRAME_STEP = 1.0
     except ValueError:
-        cmds.warning("帧范围必须填写数字，留空表示使用播放范围")
+        cmds.warning("帧范围必须填写数字，留空表示使用当前帧")
         return
 
     OCCLUSION = cmds.checkBox(_CHECK_OCCLUSION, query=True, value=True)
@@ -1492,10 +1556,11 @@ def _ui_start(*_args):
 def show_ui(*_args):
     """打开检测面板；点击「开始」后才统计场景并运行。"""
     if cmds.window(_WINDOW, exists=True):
+        _stop_frame_follow()
         cmds.deleteUI(_WINDOW)
 
     cmds.window(_WINDOW, title="不可见物体检测", widthHeight=(380, 560),
-                sizeable=False)
+                sizeable=False, closeCommand=_stop_frame_follow)
     cmds.columnLayout(adjustableColumn=True, rowSpacing=8,
                       columnAttach=("both", 10))
     cmds.text(label="选择镜头后可只跑其中几个；帧范围对已选镜头生效。",
@@ -1513,10 +1578,13 @@ def show_ui(*_args):
     cmds.setParent("..")
     cmds.setParent("..")
     cmds.setParent("..")
-    cmds.frameLayout(label="帧范围（留空 = 播放范围）", collapsable=False)
+    cmds.frameLayout(label="帧范围（默认跟随当前帧）", collapsable=False)
     cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
-    cmds.textFieldGrp(_FIELD_START, label="起始帧", text="")
-    cmds.textFieldGrp(_FIELD_END, label="结束帧", text="")
+    current_frame = _current_frame_text()
+    cmds.textFieldGrp(_FIELD_START, label="起始帧", text=current_frame,
+                      editChangedCommand=_frame_manual_edit)
+    cmds.textFieldGrp(_FIELD_END, label="结束帧", text=current_frame,
+                      editChangedCommand=_frame_manual_edit)
     cmds.textFieldGrp(_FIELD_STEP, label="帧步长", text="1")
     cmds.setParent("..")
     cmds.setParent("..")
@@ -1534,10 +1602,10 @@ def show_ui(*_args):
                          columnWidth=[(1, 168), (2, 168)],
                          columnSpacing=[(1, 6)])
     cmds.button(_BUTTON_START, label="开始", height=32, command=_ui_start)
-    cmds.button(label="关闭", height=32,
-                command=lambda *_: cmds.deleteUI(_WINDOW))
+    cmds.button(label="关闭", height=32, command=_close_ui)
     cmds.setParent("..")
     _refresh_cameras()
+    _start_frame_follow()
     cmds.showWindow(_WINDOW)
 
 
