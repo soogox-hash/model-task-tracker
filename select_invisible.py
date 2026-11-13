@@ -45,7 +45,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.1.2"           # 用于确认当前加载的是哪份脚本
+VERSION = "1.1.3"           # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -790,16 +790,30 @@ def _hit_distance(hit, source):
 
 
 _HIT_MODE = None
+_EMPTY_INTS = None
+_EMPTY_POINTS = None
+
+
+def _hit_arrays():
+    """faceIds / points 所在版本要求真实数组，空数组表示全部面。"""
+    global _EMPTY_INTS, _EMPTY_POINTS
+    if _EMPTY_INTS is None:
+        _EMPTY_INTS = om.MIntArray()
+        _EMPTY_POINTS = om.MFloatPointArray()
+    return _EMPTY_INTS, _EMPTY_POINTS
 
 
 def _closest_hit(fn, origin, direction, distance):
     """兼容不同 Maya 版本的 closestIntersection 参数形式。"""
     global _HIT_MODE
+    ids, points = _hit_arrays()
     calls = (
+        lambda: fn.closestIntersection(origin, direction, ids, points,
+                                       om.MSpace.kWorld, distance, False),
+        lambda: fn.closestIntersection(origin, direction, ids, points,
+                                       om.MSpace.kWorld, distance),
         lambda: fn.closestIntersection(origin, direction, None, None,
                                        om.MSpace.kWorld, distance, False),
-        lambda: fn.closestIntersection(origin, direction, None, None,
-                                       om.MSpace.kWorld, distance),
         lambda: fn.closestIntersection(origin, direction,
                                        space=om.MSpace.kWorld,
                                        maxParam=distance,
@@ -2078,22 +2092,18 @@ def show_ui(*_args):
                                 (_bar, "top", 3)])
     cmds.setParent("..")
     cmds.setParent("..")
-    cmds.rowColumnLayout(numberOfColumns=5,
-                         columnWidth=[(1, 10), (2, 150), (3, 24),
-                                      (4, 150), (5, 10)])
+    cmds.rowColumnLayout(numberOfColumns=7,
+                         columnWidth=[(1, 10), (2, 104), (3, 16),
+                                      (4, 104), (5, 16), (6, 104), (7, 10)])
     cmds.text(label="", width=10)
-    cmds.button(_BUTTON_START, label="开始", height=32, width=150,
+    cmds.button(_BUTTON_START, label="开始", height=32, width=104,
                 command=_ui_start)
-    cmds.text(label="", width=24)
-    cmds.button(_BUTTON_CLOSE, label="关闭", height=32, width=150,
+    cmds.text(label="", width=16)
+    cmds.button(_BUTTON_CHECK, label="检测画面内", height=32, width=104,
+                command=_check_selected)
+    cmds.text(label="", width=16)
+    cmds.button(_BUTTON_CLOSE, label="关闭", height=32, width=104,
                 command=_close_ui)
-    cmds.text(label="", width=10)
-    cmds.setParent("..")
-    cmds.rowColumnLayout(numberOfColumns=3,
-                         columnWidth=[(1, 10), (2, 324), (3, 10)])
-    cmds.text(label="", width=10)
-    cmds.button(_BUTTON_CHECK, label="检查选中物体是否在画面内",
-                height=24, width=324, command=_check_selected)
     cmds.text(label="", width=10)
     cmds.setParent("..")
     cmds.text(_INFO, label="点击「开始」后统计场景数据", align="center")
