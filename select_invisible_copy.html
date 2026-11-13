@@ -44,7 +44,7 @@
 <body>
 <header>
   <span class="title">select_invisible.py</span>
-  <span class="meta">2127 行 · 78.0 KB · Maya 2020+ / Python 3</span>
+  <span class="meta">2173 行 · 79.7 KB · Maya 2020+ / Python 3</span>
   <span class="spacer"></span>
   <button id="copy">复制代码</button>
   <button id="download" class="ghost">下载 .py</button>
@@ -97,7 +97,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.1.4"           # 用于确认当前加载的是哪份脚本
+VERSION = "1.1.5"           # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -320,6 +320,45 @@ def _target_visible(target):
 
 
 # ---------------- 每帧镜头视锥 ----------------
+def _perspective_extents(fn, aspect):
+    """由焦距、胶片孔径和 film fit 计算 (tanH, tanV)。
+
+    直接算比 getRenderingFrustum 更可控：后者返回值的单位随版本变化，
+    曾导致视锥放宽数倍、画面外物体被误判为画面内。
+    """
+    focal = float(fn.focalLength)
+    if focal &lt;= 0:
+        raise RuntimeError("焦距无效")
+    hfa = float(fn.horizontalFilmAperture) * 25.4
+    vfa = float(fn.verticalFilmAperture) * 25.4
+    if hfa &lt;= 0 or vfa &lt;= 0:
+        raise RuntimeError("胶片孔径无效")
+    tan_h = (hfa * 0.5) / focal
+    tan_v = (vfa * 0.5) / focal
+    film_aspect = hfa / vfa
+    fit = int(fn.filmFit)
+    horizontal = int(getattr(om.MFnCamera, "kHorizontalFilmFit", 0))
+    vertical = int(getattr(om.MFnCamera, "kVerticalFilmFit", 1))
+    fill = int(getattr(om.MFnCamera, "kFillFilmFit", 2))
+    if fit == vertical:
+        tan_h = tan_v * aspect
+    elif fit == fill:
+        # 画面覆盖孔径：宽画面裁掉上下，窄画面裁掉左右。
+        if aspect &gt;= film_aspect:
+            tan_v = tan_h / aspect
+        else:
+            tan_h = tan_v * aspect
+    elif fit != horizontal:
+        # overscan：完整露出孔径，画面多出的部分留边。
+        if aspect &gt;= film_aspect:
+            tan_h = tan_v * aspect
+        else:
+            tan_v = tan_h / aspect
+    else:
+        tan_v = tan_h / aspect
+    return tan_h, tan_v
+
+
 def _cam_frustum(cam_shape, margin=None):
     dag = _to_dag_path(cam_shape)
     fn = om.MFnCamera(dag)
@@ -333,26 +372,24 @@ def _cam_frustum(cam_shape, margin=None):
         pixel_aspect = float(cmds.getAttr("defaultResolution.pixelAspect"))
     if width &lt;= 0 or height &lt;= 0 or pixel_aspect &lt;= 0:
         raise RuntimeError("渲染分辨率或像素宽高比无效")
-    # getFilmFrustum 返回尺寸/偏移，并非左右上下边界；渲染视锥才直接
-    # 返回 (left, right, bottom, top)，且会处理 film fit 和画面宽高比。
-    left, right, bottom, top = fn.getRenderingFrustum(
-        width * pixel_aspect / height)
-    left, right = float(left), float(right)
-    bottom, top = float(bottom), float(top)
+    aspect = width * pixel_aspect / height
     if near &lt;= 0 or far &lt; near:
         raise RuntimeError("镜头裁剪面无效：" + cam_shape)
 
-    scale = MARGIN if margin is None else margin
-    overscan = float(fn.overscan)
-    cx, cy = (left + right) * 0.5, (bottom + top) * 0.5
-    hx = (right - left) * 0.5 * scale * overscan
-    hy = (top - bottom) * 0.5 * scale * overscan
-    left, right = cx - hx, cx + hx
-    bottom, top = cy - hy, cy + hy
     ortho = bool(cmds.camera(cam_shape, query=True, orthographic=True))
-    if not ortho:
-        left, right = left / near, right / near
-        bottom, top = bottom / near, top / near
+    if ortho:
+        # 正交镜头：orthographicWidth 是世界单位宽度。
+        half_w = float(fn.orthographicWidth) * 0.5
+        half_h = half_w / aspect
+    else:
+        half_w, half_h = _perspective_extents(fn, aspect)
+    scale = (MARGIN if margin is None else margin) * float(fn.overscan)
+    half_w *= scale
+    half_h *= scale
+    if half_w &lt;= 0 or half_h &lt;= 0:
+        raise RuntimeError("镜头视锥无效：" + cam_shape)
+    left, right = -half_w, half_w
+    bottom, top = -half_h, half_h
 
     translation = om.MTransformationMatrix(matrix).translation(om.MSpace.kWorld)
     direction = om.MVector(0, 0, -1) * matrix
@@ -1554,6 +1591,12 @@ def _check_selected(*_args):
                     if not evidence:
                         continue
                     stats[target][cam]["inside"].append(frame)
+                    u, v = max((_screen_ratio(p, frustum) for p in evidence),
+                               key=lambda s: max(abs(s[0]), abs(s[1])))
+                    prev = stats[target][cam].get("edge")
+                    if prev is None or max(abs(u), abs(v)) &gt; max(
+                            abs(prev[0]), abs(prev[1])):
+                        stats[target][cam]["edge"] = (u, v)
                     if not OCCLUSION:
                         stats[target][cam]["clear"].append(frame)
                         continue
@@ -1577,15 +1620,18 @@ def _check_selected(*_args):
         for cam in cam_shapes:
             data = stats[target][cam]
             name = labels[cam]
+            edge = data.get("edge")
+            edge_text = ("（采样点 u=%.2f, v=%.2f）" % edge) if edge else ""
             if data["clear"]:
                 inside_any = True
-                lines.append("  %s：画面内，未被遮挡 %d/%d 帧%s" %
+                lines.append("  %s：画面内，未被遮挡 %d/%d 帧%s%s" %
                              (name, len(data["clear"]), len(frames),
-                              _frame_span(data["clear"])))
+                              _frame_span(data["clear"]), edge_text))
             elif data["inside"]:
                 inside_any = True
-                lines.append("  %s：画面内，但全部被遮挡 %d/%d 帧" %
-                             (name, len(data["inside"]), len(frames)))
+                lines.append("  %s：画面内，但全部被遮挡 %d/%d 帧%s" %
+                             (name, len(data["inside"]), len(frames),
+                              edge_text))
             else:
                 lines.append("  %s：不在画面内（%d 帧）" %
                              (name, len(frames)))
