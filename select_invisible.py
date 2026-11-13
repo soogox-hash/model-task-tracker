@@ -1258,11 +1258,17 @@ def _frame_field(field):
     return float(text) if text else None
 
 
+def _camera_label(shape):
+    """列表显示大纲里的节点名（相机 transform），不带 Shape 后缀。"""
+    parents = cmds.listRelatives(shape, parent=True) or []
+    return parents[0] if parents else _short(shape)
+
+
 def _refresh_cameras(*_args):
     """重新枚举场景镜头并默认全选。"""
     global _CAMERAS_CACHE
     _CAMERAS_CACHE = _cameras([])
-    labels = [_short(cam) for cam in _CAMERAS_CACHE]
+    labels = [_camera_label(cam) for cam in _CAMERAS_CACHE]
     cmds.textScrollList(_CAMERA_LIST, edit=True, removeAll=True)
     if labels:
         cmds.textScrollList(_CAMERA_LIST, edit=True, append=labels)
