@@ -1596,7 +1596,6 @@ def show_ui(*_args):
                          columnWidth=[(1, 172), (2, 172)],
                          columnSpacing=[(1, 8)],
                          rowSpacing=[(1, 6), (2, 6)],
-                         rowAttach=[(1, "center", 0), (2, "center", 0)],
                          columnAlign=[(1, "left"), (2, "left")])
     current_frame = _current_frame_text()
     cmds.textFieldGrp(_FIELD_START, label="起始帧", text=current_frame,

@@ -44,7 +44,7 @@
 <body>
 <header>
   <span class="title">select_invisible.py</span>
-  <span class="meta">1648 行 · 59.7 KB · Maya 2020+ / Python 3</span>
+  <span class="meta">1647 行 · 59.6 KB · Maya 2020+ / Python 3</span>
   <span class="spacer"></span>
   <button id="copy">复制代码</button>
   <button id="download" class="ghost">下载 .py</button>
@@ -1648,7 +1648,6 @@ def show_ui(*_args):
                          columnWidth=[(1, 172), (2, 172)],
                          columnSpacing=[(1, 8)],
                          rowSpacing=[(1, 6), (2, 6)],
-                         rowAttach=[(1, "center", 0), (2, "center", 0)],
                          columnAlign=[(1, "left"), (2, "left")])
     current_frame = _current_frame_text()
     cmds.textFieldGrp(_FIELD_START, label="起始帧", text=current_frame,
