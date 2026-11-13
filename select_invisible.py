@@ -1185,6 +1185,105 @@ def _chosen_cameras():
     return [listed[i - 1] for i in indices if 0 < i <= len(listed)]
 
 
+def _main_window_minimized():
+    """检测 Maya 主窗口是否最小化；取不到 Qt 时视为正常。"""
+    try:
+        from maya import OpenMayaUI as legacy_ui
+    except Exception:
+        return False
+    try:
+        from shiboken2 import wrapInstance
+        from PySide2 import QtWidgets
+    except Exception:
+        try:
+            from shiboken6 import wrapInstance
+            from PySide6 import QtWidgets
+        except Exception:
+            return False
+    try:
+        pointer = legacy_ui.MQtUtil.mainWindow()
+        if not pointer:
+            return False
+        window = wrapInstance(int(pointer), QtWidgets.QWidget)
+        return bool(window and window.isMinimized())
+    except Exception:
+        return False
+
+
+def _pixel_preflight(targets):
+    """返回无法使用视口 ID-Buffer 的原因与解决方法列表。"""
+    problems = []
+    try:
+        if cmds.about(batch=True):
+            problems.append((
+                "当前是批处理/无界面会话（mayapy 或 -batch），没有 3D 视口。",
+                "用 Maya 图形界面正常启动后再运行脚本，不要用 mayapy。"))
+    except Exception:
+        pass
+
+    try:
+        import maya.api.OpenMayaUI as omui
+    except Exception:
+        problems.append((
+            "当前环境无法加载 maya.api.OpenMayaUI，说明不是 GUI 会话。",
+            "改用 Maya 图形界面启动，并确认安装完整。"))
+        return problems
+
+    view = None
+    try:
+        view = omui.M3dView.active3dView()
+    except Exception as exc:
+        problems.append((
+            "读取活动视口失败：%s" % exc,
+            "重新打开一个 3D 视图面板后再试。"))
+    if view is None:
+        problems.append((
+            "没有活动的 3D 视口（可能所有视图都被关闭或替换）。",
+            "打开一个 3D 视图面板并点击使其激活，不要把脚本编辑器最大化"
+            "覆盖整个视图区域。"))
+        return problems
+
+    try:
+        view.getCamera()
+    except Exception as exc:
+        problems.append((
+            "活动视口不可用：%s" % exc,
+            "恢复或新建一个 3D 视图面板后重试。"))
+
+    try:
+        width, height = view.portWidth(), view.portHeight()
+    except Exception:
+        width, height = None, None
+    if width is not None and (width <= 0 or height <= 0):
+        problems.append((
+            "视口尺寸为 0，画面没有实际绘制。",
+            "取消最小化 Maya 主窗口，恢复视图面板大小后再运行。"))
+
+    if _main_window_minimized():
+        problems.append((
+            "Maya 主窗口处于最小化状态，视口不会刷新。",
+            "还原 Maya 主窗口并保持可见后重新运行。"))
+
+    capacity = _ID_LEVELS ** 3
+    if len(targets) > capacity:
+        problems.append((
+            "候选物体 %d 个，超过 ID 色容量 %d 个，无法分配唯一颜色。"
+            % (len(targets), capacity),
+            "先在视口里选中部分物体缩小范围，或分批检测。"))
+
+    return problems
+
+
+def _pixel_problem_message(problems):
+    lines = ["无法使用「视口 ID-Buffer」模式："]
+    for number, (reason, solution) in enumerate(problems, 1):
+        lines.append("%d. %s" % (number, reason))
+        lines.append("   解决方法：%s" % solution)
+    lines.append("")
+    lines.append("可以取消勾选后改用采样模式，精度略低但不受视口限制。")
+    return "\n".join(lines)
+
+
 def _ui_start(*_args):
     """点击开始后才扫描场景并执行判定。"""
     global FRAME_START, FRAME_END, FRAME_STEP
@@ -1229,6 +1328,29 @@ def _ui_start(*_args):
     if not targets:
         cmds.warning("场景里没有可判定的网格模型")
         return
+
+    if PIXEL_EXACT:
+        problems = _pixel_preflight(targets)
+        if problems:
+            message = _pixel_problem_message(problems)
+            print(message)
+            try:
+                choice = cmds.confirmDialog(
+                    title="无法运行视口 ID-Buffer",
+                    message=message,
+                    button=["改用采样判定", "取消"],
+                    defaultButton="改用采样判定",
+                    cancelButton="取消",
+                    dismissString="取消")
+            except Exception:
+                choice = "改用采样判定"
+            if choice != "改用采样判定":
+                return
+            PIXEL_EXACT = False
+            try:
+                cmds.checkBox(_CHECK_PIXEL, edit=True, value=False)
+            except Exception:
+                pass
 
     update = _make_progress()
     _set_progress(0, 0.0)
