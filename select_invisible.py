@@ -786,6 +786,17 @@ def _report(invisible, unresolved):
         print("另有 %d 个物体无法判定，请查看上方原因。" % len(unresolved))
 
 
+def _notify(title, message):
+    """用消息框显示信息；无 GUI 时退回脚本编辑器输出。"""
+    print(message)
+    try:
+        cmds.confirmDialog(title=title, message=message, button=["确定"],
+                           defaultButton="确定", dismissString="确定",
+                           icon="information")
+    except Exception:
+        pass
+
+
 def select_invisible(*_args):
     """主入口：选中在指定镜头、指定帧范围内始终不可见的物体。"""
     original_time = cmds.currentTime(query=True)
@@ -801,9 +812,10 @@ def select_invisible(*_args):
             return []
         frames = _sample_frames()
         _validate_options(targets)
-        print("镜头 %d 个，帧 %d 个（%g 至 %g），候选物体 %d 个" %
-              (len(cam_shapes), len(frames), frames[0], frames[-1],
-               len(targets)))
+        _notify("不可见物体判定",
+                "镜头 %d 个\n帧 %d 个（%g 至 %g）\n候选物体 %d 个" %
+                (len(cam_shapes), len(frames), frames[0], frames[-1],
+                 len(targets)))
 
         invisible = None
         unresolved = []
