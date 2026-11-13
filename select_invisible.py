@@ -776,7 +776,8 @@ def _hit_distance(hit, source):
     values = hit if isinstance(hit, (tuple, list)) else (hit,)
     for value in values:
         if isinstance(value, (om.MPoint, om.MFloatPoint)):
-            return om.MVector(value - source).length()
+            return om.MVector(value.x - source.x, value.y - source.y,
+                              value.z - source.z).length()
     for value in values:
         if isinstance(value, float) and math.isfinite(value):
             return value
@@ -784,11 +785,17 @@ def _hit_distance(hit, source):
 
 
 def _ray_blocked(source, destination, index, skip_transform):
-    direction = om.MVector(destination - source)
-    distance = direction.length()
+    # MFnMesh.closestIntersection 在 API 2.0 只接受 MFloatPoint/MFloatVector。
+    sx, sy, sz = source.x, source.y, source.z
+    dx = destination.x - sx
+    dy = destination.y - sy
+    dz = destination.z - sz
+    distance = math.sqrt(dx * dx + dy * dy + dz * dz)
     if distance <= RAY_EPSILON:
         return False
-    direction.normalize()
+    origin = om.MFloatPoint(sx, sy, sz)
+    direction = om.MFloatVector(dx / distance, dy / distance,
+                                dz / distance)
     for fn, shape, transform, bounds in index.candidates(source, destination):
         if _under_transform(transform, skip_transform):
             continue
@@ -797,7 +804,7 @@ def _ray_blocked(source, destination, index, skip_transform):
             continue
         try:
             hit = fn.closestIntersection(
-                source, direction, space=om.MSpace.kWorld,
+                origin, direction, space=om.MSpace.kWorld,
                 maxParam=distance, testBothDirections=False)
         except Exception as exc:
             raise RuntimeError("遮挡射线失败：%s：%s" % (shape, exc))
