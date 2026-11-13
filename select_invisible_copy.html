@@ -2253,9 +2253,9 @@ def show_ui(*_args):
     cmds.setParent("..")
     # 进度条默认隐藏；用同高度的占位文字顶住它的位置，
     # 开始后隐藏占位、显示进度条，窗口高度始终不变。
-    cmds.text(_PROGRESS_SPACER, label=" ", height=14)
+    cmds.text(_PROGRESS_SPACER, label=" ", height=20)
     cmds.progressBar(_PROGRESS_BAR, minValue=0, maxValue=100,
-                     height=14, visible=False)
+                     height=20, visible=False)
     cmds.rowColumnLayout(numberOfColumns=7,
                          columnWidth=[(1, 10), (2, 104), (3, 16),
                                       (4, 104), (5, 16), (6, 104), (7, 10)])
