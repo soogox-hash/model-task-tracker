@@ -27,6 +27,7 @@ PIXEL_EXACT 保留原参数名，但实际是“视口 ID-Buffer 模式”：逐
 目标过多或需要独立排除透明遮挡体时，会安全退回采样模式。
 """
 import math
+from array import array
 
 import maya.cmds as cmds
 import maya.api.OpenMaya as om
@@ -46,6 +47,8 @@ PIXEL_EXACT = False         # 视口 ID-Buffer；需要 Maya GUI
 EXCLUDE_OCCLUDERS = ()      # 采样模式下不算遮挡体的物体名前缀
 RAY_EPSILON = 0.01          # 遮挡射线端点容差（场景单位）
 PIXEL_TOLERANCE = 1         # ID 缓冲每通道允许的 8-bit 误差
+EXACT_TRIANGLE_BUDGET = 200000  # 单物体精确视锥裁剪的三角形上限
+PROGRESS_EVERY = 50         # 每处理多少个物体打印一次进度
 
 _ID_LEVELS = 43             # 43^3 个颜色；0 和末号保留，其余分配给目标
 _DEFAULT_CAMERAS = ("frontShape", "sideShape", "topShape")
@@ -370,21 +373,17 @@ def _bbox_definitely_outside(points, frustum):
 
 
 # ---------------- 当前帧表面几何 ----------------
-def _target_geometry(target, cache):
-    if target in cache:
-        return cache[target]
+def _target_geometry(target):
+    """读取当前帧几何；由调用方用完即释放，避免缓存全部物体撑爆内存。"""
     geometry = []
     for shape in _mesh_shapes(target):
         fn = om.MFnMesh(_to_dag_path(shape))
         vertices = list(fn.getPoints(om.MSpace.kWorld))
         _counts, indices = fn.getTriangles()
-        indices = list(indices)
+        indices = array("i", indices)  # 每索引 4 字节，避免 Python int 列表爆内存
         if len(indices) % 3:
             raise RuntimeError("三角索引损坏：" + shape)
-        triangles = [tuple(indices[i:i + 3])
-                     for i in range(0, len(indices), 3)]
-        geometry.append((vertices, triangles))
-    cache[target] = geometry
+        geometry.append((vertices, indices))
     return geometry
 
 
@@ -400,10 +399,10 @@ def _uniform_indices(count, limit):
 
 
 def _vertex_samples(geometry, limit):
-    total = sum(len(vertices) for vertices, _triangles in geometry)
+    total = sum(len(vertices) for vertices, _indices in geometry)
     result = []
     for index in _uniform_indices(total, limit):
-        for vertices, _triangles in geometry:
+        for vertices, _indices in geometry:
             if index < len(vertices):
                 result.append(vertices[index])
                 break
@@ -412,48 +411,91 @@ def _vertex_samples(geometry, limit):
 
 
 def _centroid_samples(geometry, limit):
-    total = sum(len(triangles) for _vertices, triangles in geometry)
+    total = sum(len(indices) // 3 for _vertices, indices in geometry)
     result = []
     for index in _uniform_indices(total, limit):
-        for vertices, triangles in geometry:
-            if index < len(triangles):
-                a, b, c = (vertices[i] for i in triangles[index])
+        for vertices, indices in geometry:
+            count = len(indices) // 3
+            if index < count:
+                base = index * 3
+                a, b, c = (vertices[indices[base]],
+                           vertices[indices[base + 1]],
+                           vertices[indices[base + 2]])
                 result.append(om.MPoint(
                     (a.x + b.x + c.x) / 3.0,
                     (a.y + b.y + c.y) / 3.0,
                     (a.z + b.z + c.z) / 3.0))
                 break
-            index -= len(triangles)
+            index -= count
     return result
 
 
-def _frustum_evidence(target, geometry, frustum, limit):
-    """返回视锥内真实表面点；空列表表示此镜头视野外。"""
-    if not any(triangles for _vertices, triangles in geometry):
-        return []
-    if _bbox_definitely_outside(_bbox_points(target), frustum):
-        return []
+def _frustum_evidence(bbox, geometry, frustum, limit):
+    """返回 (视锥内真实表面点, 是否因预算不足无法确认)。"""
+    if not any(indices for _vertices, indices in geometry):
+        return [], False
+    if _bbox_definitely_outside(bbox, frustum):
+        return [], False
 
     evidence = [p for p in _vertex_samples(geometry, FRUSTUM_SAMPLES)
                 if _point_in_frustum(p, frustum)]
     if evidence or not EXACT_FRUSTUM:
-        return evidence[:limit]
+        return evidence[:limit], False
 
     # 顶点都在外部不代表表面在外部：逐个三角形裁剪，覆盖大面片、
-    # 镜头位于物体内部、视锥仅切到一条边等情况。
-    for vertices, triangles in geometry:
+    # 镜头位于物体内部、视锥仅切到一条边等情况。超出预算时按“可能
+    # 可见”处理，宁可保留物体，也不误选可见物体。
+    budget = EXACT_TRIANGLE_BUDGET
+    for vertices, indices in geometry:
         camera_vertices = [_camera_point(p, frustum) for p in vertices]
-        for triangle in triangles:
+        for base in range(0, len(indices) - 2, 3):
+            if budget <= 0:
+                return [], True
+            budget -= 1
             clipped = _clip_triangle(
-                [camera_vertices[i] for i in triangle], frustum)
+                [camera_vertices[indices[base + i]] for i in range(3)],
+                frustum)
             for point in clipped:
                 evidence.append(_world_point(point, frustum))
                 if len(evidence) >= limit:
-                    return evidence
-    return evidence
+                    return evidence, False
+    return evidence, False
 
 
 # ---------------- 遮挡 ----------------
+def _world_bounds(node):
+    bb = cmds.xform(node, query=True, boundingBox=True, worldSpace=True)
+    if not bb or len(bb) != 6:
+        return None
+    return tuple(float(v) for v in bb)
+
+
+def _segment_hits_bounds(source, destination, bounds, pad):
+    """世界空间线段与 AABB 快速相交测试，用来剔除无关遮挡体。"""
+    if bounds is None:
+        return True
+    src = (source.x, source.y, source.z)
+    vector = (destination.x - src[0], destination.y - src[1],
+              destination.z - src[2])
+    low = (bounds[0] - pad, bounds[1] - pad, bounds[2] - pad)
+    high = (bounds[3] + pad, bounds[4] + pad, bounds[5] + pad)
+    enter, leave = 0.0, 1.0
+    for axis in range(3):
+        if abs(vector[axis]) < 1e-12:
+            if src[axis] < low[axis] or src[axis] > high[axis]:
+                return False
+            continue
+        first = (low[axis] - src[axis]) / vector[axis]
+        second = (high[axis] - src[axis]) / vector[axis]
+        if first > second:
+            first, second = second, first
+        enter = max(enter, first)
+        leave = min(leave, second)
+        if enter > leave:
+            return False
+    return True
+
+
 def _build_occluders():
     result = []
     for shape in _all_shapes("mesh"):
@@ -463,26 +505,46 @@ def _build_occluders():
             continue
         if not _visible_to_camera(shape):
             continue
-        result.append((om.MFnMesh(_to_dag_path(shape)), shape, transform))
+        result.append((om.MFnMesh(_to_dag_path(shape)), shape, transform,
+                       _world_bounds(shape)))
     return result
 
 
-def _ray_blocked(source, destination, occluders):
+def _hit_distance(hit, source):
+    """兼容不同返回顺序，取命中点到射线起点的距离。"""
+    if not hit:
+        return None
+    values = hit if isinstance(hit, (tuple, list)) else (hit,)
+    for value in values:
+        if isinstance(value, (om.MPoint, om.MFloatPoint)):
+            return om.MVector(value - source).length()
+    for value in values:
+        if isinstance(value, float) and math.isfinite(value):
+            return value
+    return None
+
+
+def _ray_blocked(source, destination, occluders, skip_transform):
     direction = om.MVector(destination - source)
     distance = direction.length()
     if distance <= RAY_EPSILON:
         return False
     direction.normalize()
-    for fn, shape, _transform in occluders:
+    for fn, shape, transform, bounds in occluders:
+        if transform == skip_transform:
+            continue
+        # 先用包围盒剔除，避免对全场景网格逐个做射线求交。
+        if not _segment_hits_bounds(source, destination, bounds, RAY_EPSILON):
+            continue
         try:
             hit = fn.closestIntersection(
-                source, direction, om.MSpace.kWorld, distance, False)
+                source, direction, space=om.MSpace.kWorld,
+                maxParam=distance, testBothDirections=False)
         except Exception as exc:
             raise RuntimeError("遮挡射线失败：%s：%s" % (shape, exc))
-        if not hit:
-            continue
-        ray_parameter = float(hit[1])
-        if RAY_EPSILON < ray_parameter < distance - RAY_EPSILON:
+        hit_distance = _hit_distance(hit, source)
+        if (hit_distance is not None and RAY_EPSILON < hit_distance
+                < distance - RAY_EPSILON):
             return True
     return False
 
@@ -517,21 +579,23 @@ def _sampling_invisible(cam_shapes, frames, targets):
         # 镜头位置和朝向必须在此帧重新求值，不能复用其他帧的矩阵。
         frustums = [(cam, _cam_frustum(cam)) for cam in cam_shapes]
         occluders = _build_occluders() if OCCLUSION else []
-        geometry_cache = {}
+        pending = [t for t in targets if t in remaining]
 
-        for target in targets:
-            if target not in remaining:
-                continue
+        for index, target in enumerate(pending, 1):
+            geometry = None
             try:
                 if not _target_visible(target):
                     continue  # 当前帧隐藏；仍可能在其他帧可见
-                geometry = _target_geometry(target, geometry_cache)
-                target_occluders = [o for o in occluders if o[2] != target]
+                bbox = _bbox_points(target)  # 每帧每物体只取一次
+                geometry = _target_geometry(target)
                 visible = False
                 for _camera, frustum in frustums:
-                    evidence = _frustum_evidence(
-                        target, geometry, frustum,
+                    evidence, uncertain = _frustum_evidence(
+                        bbox, geometry, frustum,
                         SAMPLES_PER_OBJ if OCCLUSION else 1)
+                    if uncertain:
+                        visible = True  # 无法确认时保留物体，避免误选
+                        break
                     if not evidence:
                         continue
                     if not OCCLUSION:
@@ -539,7 +603,7 @@ def _sampling_invisible(cam_shapes, frames, targets):
                         break
                     points = _occlusion_points(geometry, frustum, evidence)
                     if any(not _ray_blocked(_ray_source(p, frustum), p,
-                                            target_occluders)
+                                            occluders, target)
                            for p in points):
                         visible = True
                         break
@@ -549,6 +613,12 @@ def _sampling_invisible(cam_shapes, frames, targets):
             except Exception as exc:
                 remaining.discard(target)  # 出错不进入待删除选择
                 unresolved.append((target, str(exc)))
+            finally:
+                geometry = None  # 立即释放当前物体的几何数据
+
+            if index % PROGRESS_EVERY == 0:
+                print("  帧 %g 进度 %d/%d，剩余待判定 %d" %
+                      (frame, index, len(pending), len(remaining)))
 
         print("帧 %g：待判定 %d，无法判定 %d" %
               (frame, len(remaining), len(unresolved)))
