@@ -44,7 +44,7 @@
 <body>
 <header>
   <span class="title">select_invisible.py</span>
-  <span class="meta">1957 行 · 71.4 KB · Maya 2020+ / Python 3</span>
+  <span class="meta">2030 行 · 74.3 KB · Maya 2020+ / Python 3</span>
   <span class="spacer"></span>
   <button id="copy">复制代码</button>
   <button id="download" class="ghost">下载 .py</button>
@@ -78,8 +78,9 @@
 * 顶点采样走快路径；采样未命中时，对表面三角形做完整视锥裁剪。
 * 遮挡射线只射向位于当前视锥内的真实表面采样点。
 * 任何几何/API 错误都会把物体列为“无法判定”，不会当作不可见。
-* 检测结果统一指定到同一个共享红色 Lambert（invisible_check_red），
-  不选中物体；重复检测会复用该材质，并先还原上次的红色标记。
+* 检测结果按原因标色，不选中物体：画面外标红
+  （invisible_check_red），画面内但被完全遮挡标紫
+  （invisible_check_purple）；重复检测复用同一材质，并先还原上次标色。
 
 PIXEL_EXACT 保留原参数名，但实际是“视口 ID-Buffer 模式”：逐像素检查
 视口结果，并不等同于最终渲染器的严格可见性。无法关闭抗锯齿/色彩管理、
@@ -96,7 +97,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-MARGIN = 1.15               # 视锥放宽系数；&gt;=1 更保守
+MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
 FRAME_END = None            # 帧范围终点；None = 当前帧
@@ -120,7 +121,10 @@ MAX_GEOMETRY_TRIANGLES = 800000  # 单个物体的三角总预算
 TRACE_LOG = True            # 写入逐物体轨迹日志，崩溃后可定位到具体物体
 
 _ID_LEVELS = 43             # 43^3 个颜色；0 和末号保留，其余分配给目标
-_RED_MATERIAL = "invisible_check_red"        # 共享红色 Lambert 名称
+_MATERIALS = {
+    "red": ("invisible_check_red", (1.0, 0.0, 0.0)),
+    "purple": ("invisible_check_purple", (0.62, 0.13, 0.87)),
+}
 _RED_STATE = "invisibleCheckState"           # 记录原材质，供下次检测恢复
 _DEFAULT_CAMERAS = ("perspShape", "frontShape", "sideShape", "topShape")
 _DRAW_TYPES = ("mesh", "nurbsSurface", "subdiv", "gpuCache")
@@ -874,6 +878,7 @@ def _sampling_invisible(cam_shapes, frames, targets, progress=None):
 
 def _sample_targets(cam_shapes, frames, targets, progress=None):
     remaining = set(targets)
+    in_frame = set()
     unresolved = []
     skipped = []
     unconfirmed = []
@@ -920,6 +925,8 @@ def _sample_targets(cam_shapes, frames, targets, progress=None):
                         break
                     if not evidence:
                         continue
+                    # 进入过画面：即使被完全遮挡，也属于“被遮挡”而不是“画面外”。
+                    in_frame.add(target)
                     if not OCCLUSION:
                         visible = True
                         if DEBUG_VISIBLE:
@@ -971,7 +978,42 @@ def _sample_targets(cam_shapes, frames, targets, progress=None):
         for target in unconfirmed[:50]:
             print("   ", target)
         _trace("三角预算不足保留 %d 个" % len(unconfirmed))
-    return [t for t in targets if t in remaining], unresolved
+    invisible = [t for t in targets if t in remaining]
+    occluded = [t for t in invisible if t in in_frame]
+    return invisible, unresolved, occluded
+
+
+def _frustum_only_inside(cam_shapes, frames, targets):
+    """只判是否进入过画面（不管遮挡），用于 ID-Buffer 结果的分类。"""
+    inside = set()
+    if not targets:
+        return inside
+    original_time = cmds.currentTime(query=True)
+    try:
+        for frame in frames:
+            cmds.currentTime(frame)
+            frustums = [(cam, _cam_frustum(cam)) for cam in cam_shapes]
+            for target in targets:
+                if target in inside or not _target_visible(target):
+                    continue
+                bbox = _bbox_points(target)
+                geometry = _target_geometry(target)
+                if geometry is None:
+                    continue
+                for _cam, frustum in frustums:
+                    evidence, _uncertain = _frustum_evidence(
+                        bbox, geometry, frustum, SAMPLES_PER_OBJ)
+                    if evidence:
+                        inside.add(target)
+                        break
+            if len(inside) == len(targets):
+                break
+    finally:
+        try:
+            cmds.currentTime(original_time)
+        except Exception:
+            pass
+    return inside
 
 
 # ---------------- 视口 ID-Buffer ----------------
@@ -1210,9 +1252,9 @@ def _shape_shading_groups(shape):
         return []
 
 
-def _red_shading_group():
-    """返回共享红色 Lambert 的 shadingGroup；已存在则复用，绝不重复创建。"""
-    material = _RED_MATERIAL
+def _shading_group(key):
+    """返回共享标记材质的 shadingGroup；已存在则复用，绝不重复创建。"""
+    material, rgb = _MATERIALS[key]
     group = material + "SG"
     if cmds.objExists(material) and cmds.nodeType(material) != "shadingEngine":
         if not cmds.objExists(group):
@@ -1233,8 +1275,10 @@ def _red_shading_group():
                           noSurfaceShader=True, empty=True)
         cmds.connectAttr(material + ".outColor", group + ".surfaceShader",
                          force=True)
-    cmds.setAttr(material + ".color", 1.0, 0.0, 0.0, type="double3")
-    cmds.setAttr(material + ".ambientColor", 0.2, 0.0, 0.0, type="double3")
+    cmds.setAttr(material + ".color", rgb[0], rgb[1], rgb[2],
+                 type="double3")
+    cmds.setAttr(material + ".ambientColor", rgb[0] * 0.2, rgb[1] * 0.2,
+                 rgb[2] * 0.2, type="double3")
     cmds.setAttr(material + ".diffuse", 0.85)
     return group
 
@@ -1258,7 +1302,7 @@ def _store_paint_state(mapping):
 
 
 def _restore_paint():
-    """还原上次标红前的材质指定，保证每次检测只反映当前结果。"""
+    """还原上次标色前的材质指定，保证每次检测只反映当前结果。"""
     mapping = _paint_state()
     if not mapping:
         return
@@ -1275,44 +1319,66 @@ def _restore_paint():
     _store_paint_state({})
 
 
-def _paint_red(invisible):
-    """把不可见物体统一指定到共享红色 Lambert；返回 shadingGroup 名。"""
-    shapes = []
-    for transform in invisible:
-        relatives = cmds.listRelatives(transform, shapes=True,
-                                       fullPath=True) or []
-        for shape in relatives:
-            if cmds.nodeType(shape) == "mesh":
-                shapes.append(shape)
-    if not shapes:
-        return None
+def _paint(batches):
+    """按类别把物体指定到各自共享材质；返回 {类别: shadingGroup}。"""
+    shapes_by_key = {}
+    for key, targets in batches.items():
+        shapes = []
+        for transform in targets:
+            relatives = cmds.listRelatives(transform, shapes=True,
+                                           fullPath=True) or []
+            for shape in relatives:
+                if cmds.nodeType(shape) == "mesh":
+                    shapes.append(shape)
+        if shapes:
+            shapes_by_key[key] = shapes
+    if not shapes_by_key:
+        return {}
     _restore_paint()
-    group = _red_shading_group()
     mapping = {}
-    for shape in shapes:
-        mapping[shape] = _shape_shading_groups(shape)
-        try:
-            cmds.sets(shape, edit=True, forceElement=group)
-        except Exception:
-            mapping.pop(shape, None)
+    groups = {}
+    for key, shapes in shapes_by_key.items():
+        group = _shading_group(key)
+        groups[key] = group
+        for shape in shapes:
+            mapping[shape] = _shape_shading_groups(shape)
+            try:
+                cmds.sets(shape, edit=True, forceElement=group)
+            except Exception:
+                mapping.pop(shape, None)
     _store_paint_state(mapping)
-    return group
+    return groups
 
 
-def _report(invisible, unresolved):
+def _report(invisible, unresolved, occluded=()):
     for target, reason in unresolved:
-        print("无法判定（未选中）：%s\n    %s" % (target, reason))
+        print("无法判定（未标色）：%s\n    %s" % (target, reason))
     if invisible:
-        group = _paint_red(invisible)
-        print("在指定镜头和帧范围内始终不可见的物体 %d 个（已标红）：" %
-              len(invisible))
-        for target in invisible:
-            print("   ", target)
-        if group:
-            print("    共享材质：%s" % group)
+        blocked_set = set(occluded or ())
+        blocked = [t for t in invisible if t in blocked_set]
+        outside = [t for t in invisible if t not in blocked_set]
+        batches = {}
+        if outside:
+            batches["red"] = outside
+        if blocked:
+            batches["purple"] = blocked
+        groups = _paint(batches)
+        print("在指定镜头和帧范围内始终不可见的物体 %d 个：" % len(invisible))
+        if outside:
+            print("  画面外 %d 个（红色 %s）：" %
+                  (len(outside), groups.get("red", "")))
+            for target in outside:
+                print("     ", target)
+        if blocked:
+            print("  画面内但完全被遮挡 %d 个（紫色 %s）：" %
+                  (len(blocked), groups.get("purple", "")))
+            for target in blocked:
+                print("     ", target)
         try:
             cmds.inViewMessage(
-                amg="&lt;hl&gt;%d&lt;/hl&gt; 个物体始终不可见，已标红" % len(invisible),
+                amg="&lt;hl&gt;%d&lt;/hl&gt; 个物体不可见：画面外 %d（红），"
+                    "被遮挡 %d（紫）"
+                    % (len(invisible), len(outside), len(blocked)),
                 pos="midCenter", fade=True)
         except Exception:
             pass
@@ -1445,18 +1511,21 @@ def _run_detection(cam_shapes, targets, frames, progress=None):
     try:
         invisible = None
         unresolved = []
+        occluded = []
         if PIXEL_EXACT:
             invisible = _pixel_exact_invisible(cam_shapes, frames, targets)
             if invisible is not None:
                 print("视口 ID-Buffer 判定完成。")
+                inside = _frustum_only_inside(cam_shapes, frames, invisible)
+                occluded = [t for t in invisible if t in inside]
 
         if invisible is None:
-            invisible, unresolved = _sampling_invisible(
+            invisible, unresolved, occluded = _sampling_invisible(
                 cam_shapes, frames, targets, progress)
         elif progress is not None:
             progress(100, 1, 1, 0.0)
-        _report(invisible, unresolved)
-        return invisible
+        _report(invisible, unresolved, occluded)
+        return invisible, occluded
     finally:
         try:
             cmds.currentTime(original_time)
@@ -1482,7 +1551,7 @@ def select_invisible(*_args):
                 "镜头 %d 个\n帧 %d 个（%g 至 %g）\n候选物体 %d 个" %
                 (len(cam_shapes), len(frames), frames[0], frames[-1],
                  len(targets)))
-        return _run_detection(cam_shapes, targets, frames)
+        return _run_detection(cam_shapes, targets, frames)[0]
     except Exception as exc:
         cmds.warning("不可见物体判定已中止：%s" % exc)
         return []
@@ -1883,7 +1952,8 @@ def _ui_start(*_args):
     except Exception:
         pass
     try:
-        invisible = _run_detection(cam_shapes, targets, frames, update)
+        invisible, occluded = _run_detection(cam_shapes, targets, frames,
+                                             update)
     except Exception as exc:
         cmds.warning("不可见物体判定已中止：%s" % exc)
         _set_info("判定中止：%s" % exc)
@@ -1901,7 +1971,10 @@ def _ui_start(*_args):
     except Exception:
         pass
     if invisible:
-        _set_info("检测完成：%d 个物体始终不可见（已标红）" % len(invisible))
+        blocked = len([t for t in invisible if t in set(occluded or ())])
+        outside = len(invisible) - blocked
+        _set_info("检测完成：画面外 %d 个（红），被遮挡 %d 个（紫）"
+                  % (outside, blocked))
     else:
         _set_info("检测完成：没有发现始终不可见的物体")
     return invisible
