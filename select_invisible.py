@@ -85,9 +85,12 @@ def _short(node):
 
 
 def _is_default_camera(shape):
-    """persp / front / side / top 及其编号副本（如 perspShape1）都不参与判定。"""
-    name = _short(shape)
-    return name.rstrip("0123456789") in _DEFAULT_CAMERAS
+    """只排除 Maya 自带的那四个相机（persp/front/side/top）。
+
+    带编号的相机（persp1、persp2、perspShape1 等）都是用户新建的，
+    必须参与判定，不能一并排除。
+    """
+    return _short(shape) in _DEFAULT_CAMERAS
 
 
 def _to_dag_path(obj):
