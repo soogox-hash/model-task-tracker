@@ -1601,17 +1601,19 @@ def show_ui(*_args):
     cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
     cmds.textScrollList(_CAMERA_LIST, numberOfRows=6, height=96,
                         allowMultiSelection=True)
-    cmds.rowColumnLayout(numberOfColumns=5,
-                         columnWidth=[(1, 16), (2, 100), (3, 100),
-                                      (4, 100), (5, 16)],
-                         columnSpacing=[(1, 0), (2, 8), (3, 8), (4, 0)])
-    cmds.text(label="", width=16)
+    cmds.rowColumnLayout(numberOfColumns=7,
+                         columnWidth=[(1, 10), (2, 100), (3, 12),
+                                      (4, 100), (5, 12), (6, 100),
+                                      (7, 10)])
+    cmds.text(label="", width=10)
     cmds.button(label="全选", height=24, width=100,
                 command=_select_all_cameras)
+    cmds.text(label="", width=12)
     cmds.button(label="全不选", height=24, width=100,
                 command=_select_no_cameras)
+    cmds.text(label="", width=12)
     cmds.button(label="刷新", height=24, width=100, command=_refresh_cameras)
-    cmds.text(label="", width=16)
+    cmds.text(label="", width=10)
     cmds.setParent("..")
     cmds.setParent("..")
     cmds.setParent("..")
@@ -1654,13 +1656,16 @@ def show_ui(*_args):
                                 (_bar, "top", 7)])
     cmds.setParent("..")
     cmds.setParent("..")
-    cmds.rowColumnLayout(numberOfColumns=2,
-                         columnWidth=[(1, 150), (2, 150)],
-                         columnSpacing=[(1, 24)])
+    cmds.rowColumnLayout(numberOfColumns=5,
+                         columnWidth=[(1, 10), (2, 150), (3, 24),
+                                      (4, 150), (5, 10)])
+    cmds.text(label="", width=10)
     cmds.button(_BUTTON_START, label="开始", height=32, width=150,
                 command=_ui_start)
+    cmds.text(label="", width=24)
     cmds.button(_BUTTON_CLOSE, label="关闭", height=32, width=150,
                 command=_close_ui)
+    cmds.text(label="", width=10)
     cmds.setParent("..")
     cmds.text(_INFO, label="点击「开始」后统计场景数据", align="center")
     cmds.text(_PROGRESS_TEXT, label="进度 0%    已用 0 秒    预计剩余 --",
