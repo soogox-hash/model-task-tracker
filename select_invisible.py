@@ -45,7 +45,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.1.3"           # 用于确认当前加载的是哪份脚本
+VERSION = "1.1.4"           # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -808,12 +808,17 @@ def _closest_hit(fn, origin, direction, distance):
     global _HIT_MODE
     ids, points = _hit_arrays()
     calls = (
+        # 你这版：第 3 个参数是整型空间枚举，至少 5 个位置参数
+        lambda: fn.closestIntersection(origin, direction, om.MSpace.kWorld,
+                                       distance, False),
+        lambda: fn.closestIntersection(origin, direction, om.MSpace.kWorld,
+                                       distance),
+        # 标准 API 2.0：faceIds / points 必须是数组
         lambda: fn.closestIntersection(origin, direction, ids, points,
                                        om.MSpace.kWorld, distance, False),
         lambda: fn.closestIntersection(origin, direction, ids, points,
                                        om.MSpace.kWorld, distance),
-        lambda: fn.closestIntersection(origin, direction, None, None,
-                                       om.MSpace.kWorld, distance, False),
+        # 关键字形式
         lambda: fn.closestIntersection(origin, direction,
                                        space=om.MSpace.kWorld,
                                        maxParam=distance,
@@ -831,7 +836,10 @@ def _closest_hit(fn, origin, direction, distance):
             continue
         _HIT_MODE = mode
         return result
-    raise RuntimeError("closestIntersection 参数不兼容：" + "; ".join(errors))
+    raise RuntimeError(
+        "closestIntersection 参数不兼容：%s\n函数签名：%s"
+        % ("; ".join(errors),
+           (getattr(fn.closestIntersection, "__doc__", "") or "").strip()))
 
 
 def _ray_blocked(source, destination, index, skip_transform):
