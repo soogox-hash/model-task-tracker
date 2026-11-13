@@ -44,7 +44,7 @@
 <body>
 <header>
   <span class="title">select_invisible.py</span>
-  <span class="meta">1647 行 · 59.6 KB · Maya 2020+ / Python 3</span>
+  <span class="meta">1649 行 · 59.7 KB · Maya 2020+ / Python 3</span>
   <span class="spacer"></span>
   <button id="copy">复制代码</button>
   <button id="download" class="ghost">下载 .py</button>
@@ -1631,14 +1631,16 @@ def show_ui(*_args):
     cmds.textScrollList(_CAMERA_LIST, numberOfRows=6, height=96,
                         allowMultiSelection=True)
     cmds.rowColumnLayout(numberOfColumns=5,
-                         columnWidth=[(1, 14), (2, 96), (3, 96),
-                                      (4, 96), (5, 14)],
-                         columnSpacing=[(1, 8), (2, 8), (3, 8), (4, 8)])
-    cmds.button(label="全选", height=24, width=96,
+                         columnWidth=[(1, 16), (2, 100), (3, 100),
+                                      (4, 100), (5, 16)],
+                         columnSpacing=[(1, 0), (2, 8), (3, 8), (4, 0)])
+    cmds.text(label="", width=16)
+    cmds.button(label="全选", height=24, width=100,
                 command=_select_all_cameras)
-    cmds.button(label="全不选", height=24, width=96,
+    cmds.button(label="全不选", height=24, width=100,
                 command=_select_no_cameras)
-    cmds.button(label="刷新", height=24, width=96, command=_refresh_cameras)
+    cmds.button(label="刷新", height=24, width=100, command=_refresh_cameras)
+    cmds.text(label="", width=16)
     cmds.setParent("..")
     cmds.setParent("..")
     cmds.setParent("..")
