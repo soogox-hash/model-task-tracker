@@ -45,7 +45,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.1.1"           # 用于确认当前加载的是哪份脚本
+VERSION = "1.1.2"           # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -775,6 +775,10 @@ def _hit_distance(hit, source):
     if not hit:
         return None
     values = hit if isinstance(hit, (tuple, list)) else (hit,)
+    if values and isinstance(values[0], bool):
+        if not values[0]:
+            return None
+        values = values[1:]
     for value in values:
         if isinstance(value, (om.MPoint, om.MFloatPoint)):
             return om.MVector(value.x - source.x, value.y - source.y,
@@ -783,6 +787,37 @@ def _hit_distance(hit, source):
         if isinstance(value, float) and math.isfinite(value):
             return value
     return None
+
+
+_HIT_MODE = None
+
+
+def _closest_hit(fn, origin, direction, distance):
+    """兼容不同 Maya 版本的 closestIntersection 参数形式。"""
+    global _HIT_MODE
+    calls = (
+        lambda: fn.closestIntersection(origin, direction, None, None,
+                                       om.MSpace.kWorld, distance, False),
+        lambda: fn.closestIntersection(origin, direction, None, None,
+                                       om.MSpace.kWorld, distance),
+        lambda: fn.closestIntersection(origin, direction,
+                                       space=om.MSpace.kWorld,
+                                       maxParam=distance,
+                                       testBothDirections=False),
+        lambda: fn.closestIntersection(origin, direction),
+    )
+    if _HIT_MODE is not None:
+        return calls[_HIT_MODE]()
+    errors = []
+    for mode, call in enumerate(calls):
+        try:
+            result = call()
+        except TypeError as exc:
+            errors.append(str(exc))
+            continue
+        _HIT_MODE = mode
+        return result
+    raise RuntimeError("closestIntersection 参数不兼容：" + "; ".join(errors))
 
 
 def _ray_blocked(source, destination, index, skip_transform):
@@ -804,9 +839,7 @@ def _ray_blocked(source, destination, index, skip_transform):
         if not _segment_hits_bounds(source, destination, bounds, RAY_EPSILON):
             continue
         try:
-            hit = fn.closestIntersection(
-                origin, direction, space=om.MSpace.kWorld,
-                maxParam=distance, testBothDirections=False)
+            hit = _closest_hit(fn, origin, direction, distance)
         except Exception as exc:
             raise RuntimeError("遮挡射线失败：%s：%s" % (shape, exc))
         hit_distance = _hit_distance(hit, source)
