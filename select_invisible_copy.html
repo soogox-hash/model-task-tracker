@@ -44,7 +44,7 @@
 <body>
 <header>
   <span class="title">select_invisible.py</span>
-  <span class="meta">1854 行 · 67.7 KB · Maya 2020+ / Python 3</span>
+  <span class="meta">1957 行 · 71.4 KB · Maya 2020+ / Python 3</span>
   <span class="spacer"></span>
   <button id="copy">复制代码</button>
   <button id="download" class="ghost">下载 .py</button>
@@ -77,12 +77,15 @@
 * 包围盒仅用于保守剔除，不作为“可见”的证据。
 * 顶点采样走快路径；采样未命中时，对表面三角形做完整视锥裁剪。
 * 遮挡射线只射向位于当前视锥内的真实表面采样点。
-* 任何几何/API 错误都会把物体列为“无法判定”，不会当作不可见选中。
+* 任何几何/API 错误都会把物体列为“无法判定”，不会当作不可见。
+* 检测结果统一指定到同一个共享红色 Lambert（invisible_check_red），
+  不选中物体；重复检测会复用该材质，并先还原上次的红色标记。
 
 PIXEL_EXACT 保留原参数名，但实际是“视口 ID-Buffer 模式”：逐像素检查
 视口结果，并不等同于最终渲染器的严格可见性。无法关闭抗锯齿/色彩管理、
 目标过多或需要独立排除透明遮挡体时，会安全退回采样模式。
 """
+import json
 import math
 import os
 import tempfile
@@ -117,6 +120,8 @@ MAX_GEOMETRY_TRIANGLES = 800000  # 单个物体的三角总预算
 TRACE_LOG = True            # 写入逐物体轨迹日志，崩溃后可定位到具体物体
 
 _ID_LEVELS = 43             # 43^3 个颜色；0 和末号保留，其余分配给目标
+_RED_MATERIAL = "invisible_check_red"        # 共享红色 Lambert 名称
+_RED_STATE = "invisibleCheckState"           # 记录原材质，供下次检测恢复
 _DEFAULT_CAMERAS = ("perspShape", "frontShape", "sideShape", "topShape")
 _DRAW_TYPES = ("mesh", "nurbsSurface", "subdiv", "gpuCache")
 _DRAW_ATTRS = (
@@ -1198,23 +1203,121 @@ def _pixel_exact_invisible(cam_shapes, frames, targets):
             pass
 
 
+def _shape_shading_groups(shape):
+    try:
+        return cmds.listSets(object=shape, type=1) or []
+    except Exception:
+        return []
+
+
+def _red_shading_group():
+    """返回共享红色 Lambert 的 shadingGroup；已存在则复用，绝不重复创建。"""
+    material = _RED_MATERIAL
+    group = material + "SG"
+    if cmds.objExists(material) and cmds.nodeType(material) != "shadingEngine":
+        if not cmds.objExists(group):
+            linked = cmds.listConnections(material, type="shadingEngine") or []
+            if linked:
+                group = linked[0]
+            else:
+                group = cmds.sets(name=group, renderable=True,
+                                  noSurfaceShader=True, empty=True)
+            if not cmds.isConnected(material + ".outColor",
+                                    group + ".surfaceShader"):
+                cmds.connectAttr(material + ".outColor",
+                                 group + ".surfaceShader", force=True)
+    else:
+        material = cmds.shadingNode("lambert", asShader=True,
+                                    name=material)
+        group = cmds.sets(name=group, renderable=True,
+                          noSurfaceShader=True, empty=True)
+        cmds.connectAttr(material + ".outColor", group + ".surfaceShader",
+                         force=True)
+    cmds.setAttr(material + ".color", 1.0, 0.0, 0.0, type="double3")
+    cmds.setAttr(material + ".ambientColor", 0.2, 0.0, 0.0, type="double3")
+    cmds.setAttr(material + ".diffuse", 0.85)
+    return group
+
+
+def _paint_state():
+    if not cmds.objExists(_RED_STATE):
+        return {}
+    try:
+        raw = cmds.getAttr(_RED_STATE + ".restore")
+        return json.loads(raw) if raw else {}
+    except Exception:
+        return {}
+
+
+def _store_paint_state(mapping):
+    if not cmds.objExists(_RED_STATE):
+        cmds.createNode("transform", name=_RED_STATE)
+        cmds.setAttr(_RED_STATE + ".visibility", False)
+        cmds.addAttr(_RED_STATE, longName="restore", dataType="string")
+    cmds.setAttr(_RED_STATE + ".restore", json.dumps(mapping), type="string")
+
+
+def _restore_paint():
+    """还原上次标红前的材质指定，保证每次检测只反映当前结果。"""
+    mapping = _paint_state()
+    if not mapping:
+        return
+    for shape, groups in mapping.items():
+        if not cmds.objExists(shape):
+            continue
+        for group in groups:
+            if not cmds.objExists(group):
+                continue
+            try:
+                cmds.sets(shape, edit=True, forceElement=group)
+            except Exception:
+                pass
+    _store_paint_state({})
+
+
+def _paint_red(invisible):
+    """把不可见物体统一指定到共享红色 Lambert；返回 shadingGroup 名。"""
+    shapes = []
+    for transform in invisible:
+        relatives = cmds.listRelatives(transform, shapes=True,
+                                       fullPath=True) or []
+        for shape in relatives:
+            if cmds.nodeType(shape) == "mesh":
+                shapes.append(shape)
+    if not shapes:
+        return None
+    _restore_paint()
+    group = _red_shading_group()
+    mapping = {}
+    for shape in shapes:
+        mapping[shape] = _shape_shading_groups(shape)
+        try:
+            cmds.sets(shape, edit=True, forceElement=group)
+        except Exception:
+            mapping.pop(shape, None)
+    _store_paint_state(mapping)
+    return group
+
+
 def _report(invisible, unresolved):
     for target, reason in unresolved:
         print("无法判定（未选中）：%s\n    %s" % (target, reason))
     if invisible:
-        cmds.select(invisible, replace=True)
-        print("在指定镜头和帧范围内始终不可见的物体 %d 个（已选中）：" %
+        group = _paint_red(invisible)
+        print("在指定镜头和帧范围内始终不可见的物体 %d 个（已标红）：" %
               len(invisible))
         for target in invisible:
             print("   ", target)
+        if group:
+            print("    共享材质：%s" % group)
         try:
             cmds.inViewMessage(
-                amg="&lt;hl&gt;%d&lt;/hl&gt; 个物体始终不可见，已选中" % len(invisible),
+                amg="&lt;hl&gt;%d&lt;/hl&gt; 个物体始终不可见，已标红" % len(invisible),
                 pos="midCenter", fade=True)
         except Exception:
             pass
     else:
-        cmds.select(clear=True)
+        _restore_paint()
         print("没有发现可确认的始终不可见物体。")
     if unresolved:
         print("另有 %d 个物体无法判定，请查看上方原因。" % len(unresolved))
@@ -1798,7 +1901,7 @@ def _ui_start(*_args):
     except Exception:
         pass
     if invisible:
-        _set_info("检测完成：%d 个物体始终不可见（已选中）" % len(invisible))
+        _set_info("检测完成：%d 个物体始终不可见（已标红）" % len(invisible))
     else:
         _set_info("检测完成：没有发现始终不可见的物体")
     return invisible
