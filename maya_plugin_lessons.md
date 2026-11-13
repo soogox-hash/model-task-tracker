@@ -50,3 +50,9 @@
 20. 每次改动：升 `VERSION` → `py_compile` → 跑 `/tmp` 下的测试 →
     重新生成 `select_invisible_copy.html`，并告知行数。
 21. 脚本注释和 UI 文案用中文；窗口标题与功能保持一致。
+22. 不在场景里创建插件专用节点：标色前的材质记录写在插件自己的材质
+    （`invisible_check_red`）属性上，还原后立刻 `deleteAttr`，用户模型
+    上不留任何自定义属性；旧版遗留的 `invisibleCheckState` 每次启动
+    检测时自动删除。
+23. 被隐藏（visibility 关、显示层关、primaryVisibility 关）的物体不算
+    候选，任何一帧可见才参与判定；隐藏数量写进开始前的确认弹窗。

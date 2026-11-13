@@ -48,7 +48,7 @@
 <body>
 <header>
   <span class="title">select_invisible.py</span>
-  <span class="meta">2400 行 · 88.5 KB · Maya 2020+ / Python 3</span>
+  <span class="meta">2437 行 · 89.9 KB · Maya 2020+ / Python 3</span>
   <span class="spacer"></span>
   <button id="copy">复制代码</button>
   <button id="download" class="ghost">下载 .py</button>
@@ -101,7 +101,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.2.7"           # 用于确认当前加载的是哪份脚本
+VERSION = "1.2.8"           # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -1021,6 +1021,7 @@ def _sampling_invisible(cam_shapes, frames, targets, progress=None):
 def _sample_targets(cam_shapes, frames, targets, progress=None):
     remaining = set(targets)
     in_frame = set()
+    visible_any = set()  # 至少有一帧没被隐藏的物体，隐藏物体不参与结果
     detail = {}  # 物体首次进入画面时的镜头/帧/屏幕坐标，供日志核对
     unresolved = []
     skipped = []
@@ -1048,6 +1049,7 @@ def _sample_targets(cam_shapes, frames, targets, progress=None):
             try:
                 if not _target_visible(target):
                     continue  # 当前帧隐藏；仍可能在其他帧可见
+                visible_any.add(target)
                 bbox = _bbox_points(target)  # 每帧每物体只取一次
                 geometry = _target_geometry(target)
                 if geometry is None:
@@ -1127,9 +1129,12 @@ def _sample_targets(cam_shapes, frames, targets, progress=None):
         for target in unconfirmed[:50]:
             print("   ", target)
         _trace("三角预算不足保留 %d 个" % len(unconfirmed))
-    invisible = [t for t in targets if t in remaining]
+    invisible = [t for t in targets if t in remaining and t in visible_any]
     occluded = [t for t in invisible if t in in_frame]
-    return invisible, unresolved, occluded, detail
+    hidden = [t for t in targets if t not in visible_any]
+    if hidden:
+        print("隐藏物体 %d 个，不参与判定。" % len(hidden))
+    return invisible, unresolved, occluded, detail, hidden
 
 
 def _frustum_only_inside(cam_shapes, frames, targets):
@@ -1432,24 +1437,6 @@ def _shading_group(key):
     return group
 
 
-def _paint_state():
-    if not cmds.objExists(_RED_STATE):
-        return {}
-    try:
-        raw = cmds.getAttr(_RED_STATE + ".restore")
-        return json.loads(raw) if raw else {}
-    except Exception:
-        return {}
-
-
-def _store_paint_state(mapping):
-    if not cmds.objExists(_RED_STATE):
-        cmds.createNode("transform", name=_RED_STATE)
-        cmds.setAttr(_RED_STATE + ".visibility", False)
-        cmds.addAttr(_RED_STATE, longName="restore", dataType="string")
-    cmds.setAttr(_RED_STATE + ".restore", json.dumps(mapping), type="string")
-
-
 def _mark_groups():
     """返回两个标记材质当前连接的 shadingGroup（名称可能不是默认的）。"""
     groups = []
@@ -1462,51 +1449,83 @@ def _mark_groups():
     return list(dict.fromkeys(groups))
 
 
-def _write_original(shape, groups):
-    """把标色前的 shadingGroup 记在形状上，状态节点丢失也能还原。"""
-    plug = shape + "." + _ORIG_ATTR
+def _state_plug():
+    """原材质映射存在插件自己的红色材质上，不碰任何用户节点。"""
+    return _MATERIALS["red"][0] + "." + _ORIG_ATTR
+
+
+def _write_original(mapping):
+    node = _MATERIALS["red"][0]
+    plug = _state_plug()
+    if not cmds.objExists(node):
+        return
     try:
         if not cmds.objExists(plug):
-            cmds.addAttr(shape, longName=_ORIG_ATTR, dataType="string")
-        cmds.setAttr(plug, json.dumps(groups), type="string")
+            cmds.addAttr(node, longName=_ORIG_ATTR, dataType="string")
+        cmds.setAttr(plug, json.dumps(mapping), type="string")
     except Exception:
         pass
 
 
-def _read_original(shape):
+def _read_original():
+    plug = _state_plug()
+    if not cmds.objExists(plug):
+        return {}
+    try:
+        raw = cmds.getAttr(plug)
+        return json.loads(raw) if raw else {}
+    except Exception:
+        return {}
+
+
+def _clear_original():
+    plug = _state_plug()
+    if cmds.objExists(plug):
+        try:
+            cmds.deleteAttr(plug)
+        except Exception:
+            pass
+
+
+def _legacy_shape_original(shape):
+    """v1.2.7 曾把原材质记在形状节点上，读出来做兼容还原。"""
     plug = shape + "." + _ORIG_ATTR
     if not cmds.objExists(plug):
         return None
     try:
         raw = cmds.getAttr(plug)
-        return json.loads(raw) if raw else None
+        return json.loads(raw) if raw else []
     except Exception:
         return None
 
 
 def _restore_paint():
-    """还原上次标色前的材质指定，保证每次检测只反映当前结果。"""
-    mapping = _paint_state()
+    """还原上次标色前的材质指定，保证每次检测只反映当前结果。
+
+    记录只存在插件自己的材质节点上，还原后立即删除：用户模型上不留
+    任何自定义属性，场景里也不创建额外节点。
+    """
     restored = 0
+    mapping = _read_original()
     for shape, groups in mapping.items():
         if not cmds.objExists(shape):
             continue
-        for group in groups:
-            if not cmds.objExists(group):
-                continue
-            try:
-                cmds.sets(shape, edit=True, forceElement=group)
-                restored += 1
-            except Exception:
-                pass
-    # 兜底扫描：状态节点丢失或旧版本遗留的标色，按形状上记录的原材质
-    # 还原；连记录都没有的退回默认材质，避免一直挂着紫色/红色。
+        for old in groups:
+            if cmds.objExists(old):
+                try:
+                    cmds.sets(shape, edit=True, forceElement=old)
+                    restored += 1
+                except Exception:
+                    pass
+                break
+    # 兜底：仍挂在标记材质上但记录里没有的形状（记录丢失/旧版本），
+    # 有遗留记录按记录还原，没有就退回默认材质，避免一直挂着红或紫。
     for group in _mark_groups():
         for shape in cmds.sets(group, query=True) or []:
             if shape in mapping:
                 continue
-            originals = _read_original(shape) or ["initialShadingGroup"]
-            for old in originals:
+            for old in (_legacy_shape_original(shape)
+                        or ["initialShadingGroup"]):
                 if cmds.objExists(old):
                     try:
                         cmds.sets(shape, edit=True, forceElement=old)
@@ -1514,8 +1533,22 @@ def _restore_paint():
                     except Exception:
                         pass
                     break
-    if mapping:
-        _store_paint_state({})
+    # 清掉旧版本留在形状上的临时属性，保证下游模型干净。
+    for plug in cmds.ls("*.%s" % _ORIG_ATTR, objectsOnly=False) or []:
+        node = plug.split(".", 1)[0]
+        if cmds.nodeType(node) == "mesh":
+            try:
+                cmds.deleteAttr(node, attribute=_ORIG_ATTR)
+            except Exception:
+                pass
+    _clear_original()
+    # 删除旧版本创建的状态节点，避免场景里留下未知节点。
+    if cmds.objExists(_RED_STATE):
+        try:
+            cmds.delete(_RED_STATE)
+            print("已删除旧版本状态节点 %s。" % _RED_STATE)
+        except Exception:
+            pass
     if restored:
         print("已还原上次标色 %d 个物体。" % restored)
 
@@ -1543,17 +1576,17 @@ def _paint(batches):
         groups[key] = group
         for shape in shapes:
             mapping[shape] = _shape_shading_groups(shape)
-            _write_original(shape, mapping[shape])
             try:
                 cmds.sets(shape, edit=True, forceElement=group)
             except Exception:
                 mapping.pop(shape, None)
-    _store_paint_state(mapping)
+    _write_original(mapping)
     return groups
 
 
-def _report(invisible, unresolved, occluded=(), detail=None):
+def _report(invisible, unresolved, occluded=(), detail=None, hidden=None):
     detail = detail or {}
+    hidden = hidden or []
     for target, reason in unresolved:
         print("无法判定（未标色）：%s\n    %s" % (target, reason))
     if invisible:
@@ -1598,8 +1631,9 @@ def _report(invisible, unresolved, occluded=(), detail=None):
     blocked_n = len(invisible) - outside_n
     print("-" * 52)
     print("最终结果：始终不可见 %d 个（画面外 %d 个红色 / 被遮挡 %d 个紫色），"
-          "无法判定 %d 个"
-          % (len(invisible), outside_n, blocked_n, len(unresolved)))
+          "无法判定 %d 个%s"
+          % (len(invisible), outside_n, blocked_n, len(unresolved),
+             "，隐藏跳过 %d 个" % len(hidden) if hidden else ""))
     print("-" * 52)
 
 
@@ -1768,6 +1802,7 @@ def _run_detection(cam_shapes, targets, frames, progress=None):
         unresolved = []
         occluded = []
         detail = {}
+        hidden = []
         for cam in cam_shapes:
             frustum = _cam_frustum(cam)
             print("视锥：%s 水平 %.1f° 垂直 %.1f°（渲染 %d×%d，像素比 %.2f）"
@@ -1787,11 +1822,11 @@ def _run_detection(cam_shapes, targets, frames, progress=None):
         if invisible is None:
             if OCCLUSION:
                 _occluder_report()
-            invisible, unresolved, occluded, detail = _sampling_invisible(
-                cam_shapes, frames, targets, progress)
+            invisible, unresolved, occluded, detail, hidden = (
+                _sampling_invisible(cam_shapes, frames, targets, progress))
         elif progress is not None:
             progress(100, 1, 1, 0.0)
-        _report(invisible, unresolved, occluded, detail)
+        _report(invisible, unresolved, occluded, detail, hidden)
         return invisible, occluded
     finally:
         try:
@@ -2270,9 +2305,11 @@ def _ui_start(*_args):
         cmds.warning("场景里没有可判定的网格模型")
         return
 
-    info = ("镜头：%d 个\n模型：%d 个\n帧：%d 个（%g 至 %g）" %
-            (len(cam_shapes), len(targets), len(frames),
-             frames[0], frames[-1]))
+    hidden_targets = [t for t in targets if not _target_visible(t)]
+    info = ("镜头：%d 个\n模型：%d 个（隐藏 %d 个，不参与判定）\n"
+            "帧：%d 个（%g 至 %g）" %
+            (len(cam_shapes), len(targets), len(hidden_targets),
+             len(frames), frames[0], frames[-1]))
     print(info.replace("\n", "，"))
     # 统计信息用弹窗确认：写进底部消息行会变成多行，撑高窗口后
     # 又被单行进度覆盖，窗口就会闪一下。消息行始终保持一行。
