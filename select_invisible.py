@@ -45,7 +45,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.2.2"           # 用于确认当前加载的是哪份脚本
+VERSION = "1.2.3"           # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -1693,7 +1693,6 @@ _CHECK_EXACT = "iofExactCheck"
 _CHECK_PIXEL = "iofPixelCheck"
 _INFO = "iofInfoText"
 _PROGRESS_BAR = "iofProgressBar"
-_PROGRESS_TEXT = "iofProgressText"
 _PROGRESS_SPACER = "iofProgressSpacer"
 _BUTTON_START = "iofStartButton"
 _BUTTON_CLOSE = "iofCloseButton"
@@ -1726,16 +1725,25 @@ def _set_progress(percent, elapsed):
         eta = "计算中…"
     label = "进度 %d%%    已用 %s    预计剩余 %s" % (
         percent, _format_seconds(elapsed), eta)
+    suspended = False
     try:
-        # 用同高度的占位条顶住进度条的位置，窗口高度不随显隐变化。
+        # 挂起刷新，占位条与进度条一次性切换，避免中途重绘造成高度闪动。
+        cmds.refresh(suspend=True)
+        suspended = True
         cmds.separator(_PROGRESS_SPACER, edit=True, visible=False)
         cmds.progressBar(_PROGRESS_BAR, edit=True, progress=percent,
                          visible=True)
-        cmds.text(_PROGRESS_TEXT, edit=True, label=label, visible=True)
+        cmds.text(_INFO, edit=True, label=label)
         _trace("界面刷新 %d%%" % percent)
-        cmds.refresh(force=True)
     except Exception:
         pass  # 窗口被关闭时静默继续
+    finally:
+        if suspended:
+            try:
+                cmds.refresh(suspend=False)
+                cmds.refresh(force=True)
+            except Exception:
+                pass
 
 
 def _fit_window():
@@ -1778,24 +1786,46 @@ def _lock_progress_height():
             from PySide2 import QtWidgets
         except Exception:
             return
+    suspended = False
     try:
         bar_ptr = omui.MQtUtil.findControl(_PROGRESS_BAR)
         spacer_ptr = omui.MQtUtil.findControl(_PROGRESS_SPACER)
-        if not bar_ptr or not spacer_ptr:
+        win_ptr = omui.MQtUtil.findWindow(_WINDOW)
+        if not bar_ptr or not spacer_ptr or not win_ptr:
             return
         bar = wrapInstance(int(bar_ptr), QtWidgets.QWidget)
         spacer = wrapInstance(int(spacer_ptr), QtWidgets.QWidget)
-        # 隐藏时取 sizeHint，避免先把进度条显示出来。
-        height = max(bar.sizeHint().height(),
-                     bar.minimumSizeHint().height())
+        window = wrapInstance(int(win_ptr), QtWidgets.QWidget)
+        # 挂起刷新后把进度条显示出来量真实高度，再按该高度锁死占位条；
+        # 整个过程不重绘，用户看不到中间状态。
+        cmds.refresh(suspend=True)
+        suspended = True
+        cmds.separator(_PROGRESS_SPACER, edit=True, visible=False)
+        cmds.progressBar(_PROGRESS_BAR, edit=True, visible=True)
+        layout = window.layout()
+        if layout is not None:
+            layout.activate()
+        height = max(bar.height(), bar.sizeHint().height())
         if height < 8:
             print("[iof] 未测得进度条高度，保持默认 20 px")
-            return
-        bar.setFixedHeight(height)
-        spacer.setFixedHeight(height)
-        print("[iof] 进度条与占位高度已锁定：%d px" % height)
+        else:
+            bar.setFixedHeight(height)
+            spacer.setFixedHeight(height)
+            print("[iof] 进度条与占位高度已锁定：%d px" % height)
     except Exception:
         pass
+    finally:
+        if suspended:
+            try:
+                cmds.progressBar(_PROGRESS_BAR, edit=True, visible=False)
+                cmds.separator(_PROGRESS_SPACER, edit=True, visible=True)
+            except Exception:
+                pass
+            try:
+                cmds.refresh(suspend=False)
+                cmds.refresh(force=True)
+            except Exception:
+                pass
 
 
 def _set_info(label, color=None):
@@ -2129,11 +2159,7 @@ def _ui_start(*_args):
                 pass
 
     update = _make_progress()
-    try:
-        # 清空统计信息文字但保留这一行，避免窗口高度跳动。
-        cmds.text(_INFO, edit=True, label=" ")
-    except Exception:
-        pass
+    _set_label_color(_INFO, None)
     _set_progress(0, 0.0)
     try:
         cmds.button(_BUTTON_START, edit=True, enable=False)
@@ -2152,13 +2178,22 @@ def _ui_start(*_args):
         except Exception:
             pass
 
-    # 结束后收起进度条，恢复同高度占位，保持窗口高度不变。
+    # 结束后收起进度条，恢复同高度占位；结果显示在同一行。
+    suspended = False
     try:
+        cmds.refresh(suspend=True)
+        suspended = True
         cmds.progressBar(_PROGRESS_BAR, edit=True, visible=False)
-        cmds.text(_PROGRESS_TEXT, edit=True, label=" ")
         cmds.separator(_PROGRESS_SPACER, edit=True, visible=True)
     except Exception:
         pass
+    finally:
+        if suspended:
+            try:
+                cmds.refresh(suspend=False)
+                cmds.refresh(force=True)
+            except Exception:
+                pass
     if invisible:
         blocked = len([t for t in invisible if t in set(occluded or ())])
         outside = len(invisible) - blocked
@@ -2251,9 +2286,10 @@ def show_ui(*_args):
                 command=_close_ui)
     cmds.text(label="", width=10)
     cmds.setParent("..")
+    # 消息行统一放在按钮下方的留白里：上下等距留白，让文字垂直居中。
+    cmds.separator(style="none", height=16)
     cmds.text(_INFO, label="点击「开始」后统计场景数据", align="center")
-    # 进度文字始终占一行，空闲时用空格占位，开始后显示进度。
-    cmds.text(_PROGRESS_TEXT, label=" ", align="center")
+    cmds.separator(style="none", height=16)
     _refresh_cameras()
     _start_frame_follow()
     cmds.showWindow(_WINDOW)
