@@ -1646,14 +1646,14 @@ def show_ui(*_args):
     cmds.setParent("..")
     cmds.setParent("..")
     # 进度条默认隐藏，但保留固定高度的容器，开始后出现时界面不跳动。
-    cmds.frameLayout(_PROGRESS_BOX, height=28, borderVisible=False,
+    cmds.frameLayout(_PROGRESS_BOX, height=24, borderVisible=False,
                      labelVisible=False, collapsable=False)
-    cmds.formLayout(_PROGRESS_FORM)
+    cmds.formLayout(_PROGRESS_FORM, height=20)
     _bar = cmds.progressBar(_PROGRESS_BAR, minValue=0, maxValue=100,
                             height=14, visible=False)
     cmds.formLayout(_PROGRESS_FORM, edit=True,
                     attachForm=[(_bar, "left", 24), (_bar, "right", 24),
-                                (_bar, "top", 7)])
+                                (_bar, "top", 3)])
     cmds.setParent("..")
     cmds.setParent("..")
     cmds.rowColumnLayout(numberOfColumns=5,
