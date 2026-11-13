@@ -1267,8 +1267,10 @@ def _check_selected(*_args):
             inside_count += 1
     report = "\n".join(lines)
     print(report)
+    all_inside = inside_count == len(targets)
     _set_info("检查完成：%d/%d 个物体在所选镜头的画面内，详见脚本编辑器"
-              % (inside_count, len(targets)))
+              % (inside_count, len(targets)),
+              color="#1a7f37" if all_inside else "#d1242f")
     return report
 
 
@@ -1376,11 +1378,40 @@ def _set_progress(percent, elapsed):
         pass  # 窗口被关闭时静默继续
 
 
-def _set_info(label):
-    """更新按钮下方的信息文字，并确保它可见。"""
+def _set_info(label, color=None):
+    """更新按钮下方的信息文字；color 为 None 时恢复默认颜色。"""
     try:
         cmds.text(_INFO, edit=True, label=label, visible=True)
+    except Exception:
+        return
+    _set_label_color(_INFO, color)
+    try:
         cmds.refresh(force=True)
+    except Exception:
+        pass
+
+
+def _set_label_color(name, color):
+    """用 Qt 样式表给 Maya 文本控件设置文字颜色；失败时静默跳过。"""
+    try:
+        from maya import OpenMayaUI as omui
+    except Exception:
+        return
+    try:
+        from shiboken2 import wrapInstance
+        from PySide2 import QtWidgets
+    except Exception:
+        try:
+            from shiboken6 import wrapInstance
+            from PySide6 import QtWidgets
+        except Exception:
+            return
+    try:
+        pointer = omui.MQtUtil.findControl(name)
+        if not pointer:
+            return
+        widget = wrapInstance(int(pointer), QtWidgets.QWidget)
+        widget.setStyleSheet("color: %s;" % color if color else "")
     except Exception:
         pass
 
@@ -1636,15 +1667,14 @@ def _ui_start(*_args):
     try:
         frames = _sample_frames()
     except Exception as exc:
-        cmds.text(_INFO, edit=True, label="帧范围无效：%s" % exc)
+        _set_info("帧范围无效：%s" % exc)
         cmds.warning("帧范围无效：%s" % exc)
         return
 
     info = ("镜头：%d 个\n模型：%d 个\n帧：%d 个（%g 至 %g）" %
             (len(cam_shapes), len(targets), len(frames),
              frames[0], frames[-1]))
-    cmds.text(_INFO, edit=True, label=info)
-    cmds.refresh(force=True)
+    _set_info(info)
     print(info.replace("\n", "，"))
 
     if not cam_shapes:
