@@ -45,7 +45,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.2.12"          # 用于确认当前加载的是哪份脚本
+VERSION = "1.2.13"          # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -1645,6 +1645,11 @@ def _check_selected(*_args):
                      for cam in cam_shapes) for t in targets}
     unknown = {}
     original_time = cmds.currentTime(query=True)
+    total_units = max(1, len(frames) * len(targets))
+    started = time.time()
+    done = 0
+    shown = -1
+    _set_progress(0, 0.0)
     try:
         for frame in frames:
             cmds.currentTime(frame)
@@ -1654,6 +1659,11 @@ def _check_selected(*_args):
             occluders = _build_occluders() if OCCLUSION else []
             index = _OccluderIndex(occluders) if OCCLUSION else None
             for target in targets:
+                done += 1
+                percent = int(done * 100.0 / total_units)
+                if percent != shown:
+                    shown = percent
+                    _set_progress(percent, time.time() - started)
                 if not _target_visible(target):
                     continue
                 bbox = _bbox_points(target)
@@ -1691,6 +1701,7 @@ def _check_selected(*_args):
             cmds.currentTime(original_time)
         except Exception:
             pass
+    _set_progress(100, time.time() - started)
 
     lines = []
     inside_any = set()
@@ -1743,6 +1754,7 @@ def _check_selected(*_args):
     if unknown:
         message += "，无法判定 %d 个" % len(unknown)
     _set_info(message, color="#1a7f37" if all_inside else "#d1242f")
+    _hide_progress()
     return report
 
 
@@ -1866,6 +1878,25 @@ def _set_progress(percent, elapsed):
         _trace("界面刷新 %d%%" % percent)
     except Exception:
         pass  # 窗口被关闭时静默继续
+    finally:
+        if suspended:
+            try:
+                cmds.refresh(suspend=False)
+                cmds.refresh(force=True)
+            except Exception:
+                pass
+
+
+def _hide_progress():
+    """检测结束：收回进度条，恢复占位条，窗口高度保持不变。"""
+    suspended = False
+    try:
+        cmds.refresh(suspend=True)
+        suspended = True
+        cmds.progressBar(_PROGRESS_BAR, edit=True, visible=False)
+        cmds.separator(_PROGRESS_SPACER, edit=True, visible=True)
+    except Exception:
+        pass
     finally:
         if suspended:
             try:
