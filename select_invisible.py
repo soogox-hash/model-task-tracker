@@ -64,7 +64,7 @@ MAX_GEOMETRY_TRIANGLES = 800000  # 单个物体的三角总预算
 TRACE_LOG = True            # 写入逐物体轨迹日志，崩溃后可定位到具体物体
 
 _ID_LEVELS = 43             # 43^3 个颜色；0 和末号保留，其余分配给目标
-_DEFAULT_CAMERAS = ("frontShape", "sideShape", "topShape")
+_DEFAULT_CAMERAS = ("perspShape", "frontShape", "sideShape", "topShape")
 _DRAW_TYPES = ("mesh", "nurbsSurface", "subdiv", "gpuCache")
 _DRAW_ATTRS = (
     "overrideEnabled",
@@ -82,6 +82,12 @@ class _PixelUnavailable(Exception):
 
 def _short(node):
     return node.rsplit("|", 1)[-1]
+
+
+def _is_default_camera(shape):
+    """persp / front / side / top 及其编号副本（如 perspShape1）都不参与判定。"""
+    name = _short(shape)
+    return name.rstrip("0123456789") in _DEFAULT_CAMERAS
 
 
 def _to_dag_path(obj):
@@ -130,7 +136,7 @@ def _cameras(selection):
     candidates = selected or _all_shapes("camera")
     result = []
     for shape in dict.fromkeys(candidates):
-        if _short(shape) in _DEFAULT_CAMERAS:
+        if _is_default_camera(shape):
             continue
         if ONLY_RENDERABLE and not cmds.camera(
                 shape, query=True, renderable=True):
@@ -782,6 +788,7 @@ def _sample_targets(cam_shapes, frames, targets, progress=None):
     remaining = set(targets)
     unresolved = []
     skipped = []
+    unconfirmed = []
     total_units = max(1, len(frames) * len(targets))
     started = time.time()
     for frame_index, frame in enumerate(frames):
@@ -814,12 +821,14 @@ def _sample_targets(cam_shapes, frames, targets, progress=None):
                     _trace("跳过超大网格：%s" % target)
                     continue
                 visible = False
+                uncertain_target = False
                 for _camera, frustum in frustums:
                     evidence, uncertain = _frustum_evidence(
                         bbox, geometry, frustum,
                         SAMPLES_PER_OBJ if OCCLUSION else 1)
                     if uncertain:
-                        visible = True  # 无法确认时保留物体，避免误选
+                        # 三角面预算不足：无法确认，保留物体，避免误选。
+                        uncertain_target = True
                         break
                     if not evidence:
                         continue
@@ -832,7 +841,11 @@ def _sample_targets(cam_shapes, frames, targets, progress=None):
                            for p in points):
                         visible = True
                         break
-                if visible:
+                if uncertain_target:
+                    remaining.discard(target)
+                    unconfirmed.append(target)
+                    _trace("三角预算不足，按可见保留：%s" % target)
+                elif visible:
                     # 任一镜头、任一帧可见，就不再属于“始终不可见”。
                     remaining.discard(target)
             except Exception as exc:
@@ -857,6 +870,12 @@ def _sample_targets(cam_shapes, frames, targets, progress=None):
         for target in skipped[:50]:
             print("   ", target)
         _trace("超大网格跳过 %d 个" % len(skipped))
+    if unconfirmed:
+        print("三角形超过预算、无法确认（已按可见保留）%d 个：" %
+              len(unconfirmed))
+        for target in unconfirmed[:50]:
+            print("   ", target)
+        _trace("三角预算不足保留 %d 个" % len(unconfirmed))
     return [t for t in targets if t in remaining], unresolved
 
 
