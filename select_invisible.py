@@ -258,7 +258,7 @@ def _target_visible(target):
 
 
 # ---------------- 每帧镜头视锥 ----------------
-def _cam_frustum(cam_shape):
+def _cam_frustum(cam_shape, margin=None):
     dag = _to_dag_path(cam_shape)
     fn = om.MFnCamera(dag)
     matrix = dag.inclusiveMatrix()
@@ -280,9 +280,11 @@ def _cam_frustum(cam_shape):
     if near <= 0 or far < near:
         raise RuntimeError("镜头裁剪面无效：" + cam_shape)
 
+    scale = MARGIN if margin is None else margin
+    overscan = float(fn.overscan)
     cx, cy = (left + right) * 0.5, (bottom + top) * 0.5
-    hx = (right - left) * 0.5 * MARGIN
-    hy = (top - bottom) * 0.5 * MARGIN
+    hx = (right - left) * 0.5 * scale * overscan
+    hy = (top - bottom) * 0.5 * scale * overscan
     left, right = cx - hx, cx + hx
     bottom, top = cy - hy, cy + hy
     ortho = bool(cmds.camera(cam_shape, query=True, orthographic=True))
@@ -523,8 +525,12 @@ def _centroid_samples(geometry, limit):
     return result
 
 
-def _frustum_evidence(bbox, geometry, frustum, limit):
-    """返回 (视锥内真实表面点, 是否因预算不足无法确认)。"""
+def _frustum_evidence(bbox, geometry, frustum, limit, strict=False):
+    """返回 (视锥内真实表面点, 是否因预算不足无法确认)。
+
+    strict=True 时不做三角形预算限制，逐三角形完整裁剪，用于“检查
+    选中物体是否在画面内”这种要求绝对准确的场景。
+    """
     if not any(indices for _vertices, indices in geometry):
         return [], False
     if _bbox_definitely_outside(bbox, frustum):
@@ -538,13 +544,14 @@ def _frustum_evidence(bbox, geometry, frustum, limit):
     # 顶点都在外部不代表表面在外部：逐个三角形裁剪，覆盖大面片、
     # 镜头位于物体内部、视锥仅切到一条边等情况。超出预算时按“可能
     # 可见”处理，宁可保留物体，也不误选可见物体。
-    budget = EXACT_TRIANGLE_BUDGET
+    budget = None if strict else EXACT_TRIANGLE_BUDGET
     for vertices, indices in geometry:
         camera_vertices = [_camera_point(p, frustum) for p in vertices]
         for base in range(0, len(indices) - 2, 3):
-            if budget <= 0:
-                return [], True
-            budget -= 1
+            if budget is not None:
+                if budget <= 0:
+                    return [], True
+                budget -= 1
             clipped = _clip_triangle(
                 [camera_vertices[indices[base + i]] for i in range(3)],
                 frustum)
@@ -1205,7 +1212,9 @@ def _check_selected(*_args):
     try:
         for frame in frames:
             cmds.currentTime(frame)
-            frustums = [(cam, _cam_frustum(cam)) for cam in cam_shapes]
+            # 检查模式严格按真实画面判定：不放宽视锥、不设三角形预算。
+            frustums = [(cam, _cam_frustum(cam, margin=1.0))
+                        for cam in cam_shapes]
             occluders = _build_occluders() if OCCLUSION else []
             index = _OccluderIndex(occluders) if OCCLUSION else None
             for target in targets:
@@ -1219,7 +1228,7 @@ def _check_selected(*_args):
                 for cam, frustum in frustums:
                     evidence, uncertain = _frustum_evidence(
                         bbox, geometry, frustum,
-                        SAMPLES_PER_OBJ if OCCLUSION else 1)
+                        SAMPLES_PER_OBJ if OCCLUSION else 1, strict=True)
                     if uncertain:
                         unknown[target] = "三角形超过预算，无法精确判定"
                         continue
