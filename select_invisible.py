@@ -1590,10 +1590,10 @@ def show_ui(*_args):
     current_frame = _current_frame_text()
     cmds.textFieldGrp(_FIELD_START, label="起始帧", text=current_frame,
                       width=172, columnWidth=[(1, 46), (2, 118)],
-                      editChangedCommand=_frame_manual_edit)
+                      changeCommand=_frame_manual_edit)
     cmds.textFieldGrp(_FIELD_END, label="结束帧", text=current_frame,
                       width=172, columnWidth=[(1, 46), (2, 118)],
-                      editChangedCommand=_frame_manual_edit)
+                      changeCommand=_frame_manual_edit)
     cmds.textFieldGrp(_FIELD_STEP, label="帧步长", text="1",
                       width=172, columnWidth=[(1, 46), (2, 118)])
     cmds.setParent("..")
