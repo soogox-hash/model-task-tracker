@@ -1206,6 +1206,7 @@ _INFO = "iofInfoText"
 _PROGRESS_BAR = "iofProgressBar"
 _PROGRESS_TEXT = "iofProgressText"
 _PROGRESS_BOX = "iofProgressBox"
+_PROGRESS_FORM = "iofProgressForm"
 _BUTTON_START = "iofStartButton"
 _BUTTON_CLOSE = "iofCloseButton"
 _CAMERA_LIST = "iofCameraList"
@@ -1239,11 +1240,20 @@ def _set_progress(percent, elapsed):
     try:
         cmds.progressBar(_PROGRESS_BAR, edit=True, progress=percent,
                          visible=True)
-        cmds.text(_PROGRESS_TEXT, edit=True, label=label)
+        cmds.text(_PROGRESS_TEXT, edit=True, label=label, visible=True)
         _trace("界面刷新 %d%%" % percent)
         cmds.refresh(force=True)
     except Exception:
         pass  # 窗口被关闭时静默继续
+
+
+def _set_info(label):
+    """更新按钮下方的信息文字，并确保它可见。"""
+    try:
+        cmds.text(_INFO, edit=True, label=label, visible=True)
+        cmds.refresh(force=True)
+    except Exception:
+        pass
 
 
 def _make_progress():
@@ -1550,15 +1560,28 @@ def _ui_start(*_args):
     except Exception:
         pass
     try:
-        return _run_detection(cam_shapes, targets, frames, update)
+        invisible = _run_detection(cam_shapes, targets, frames, update)
     except Exception as exc:
         cmds.warning("不可见物体判定已中止：%s" % exc)
+        _set_info("判定中止：%s" % exc)
         return []
     finally:
         try:
             cmds.button(_BUTTON_START, edit=True, enable=True)
         except Exception:
             pass
+
+    # 结束后收起进度条与进度文字，在按钮下方显示结果。
+    try:
+        cmds.progressBar(_PROGRESS_BAR, edit=True, visible=False)
+        cmds.text(_PROGRESS_TEXT, edit=True, visible=False)
+    except Exception:
+        pass
+    if invisible:
+        _set_info("检测完成：%d 个物体始终不可见（已选中）" % len(invisible))
+    else:
+        _set_info("检测完成：没有发现始终不可见的物体")
+    return invisible
 
 
 def show_ui(*_args):
@@ -1621,12 +1644,14 @@ def show_ui(*_args):
     cmds.setParent("..")
     cmds.setParent("..")
     # 进度条默认隐藏，但保留固定高度的容器，开始后出现时界面不跳动。
-    cmds.frameLayout(_PROGRESS_BOX, height=26, borderVisible=False,
+    cmds.frameLayout(_PROGRESS_BOX, height=28, borderVisible=False,
                      labelVisible=False, collapsable=False)
-    cmds.rowColumnLayout(numberOfColumns=3,
-                         columnWidth=[(1, 30), (2, 300), (3, 30)])
-    cmds.progressBar(_PROGRESS_BAR, minValue=0, maxValue=100, height=16,
-                     width=300, visible=False)
+    cmds.formLayout(_PROGRESS_FORM)
+    _bar = cmds.progressBar(_PROGRESS_BAR, minValue=0, maxValue=100,
+                            height=14, visible=False)
+    cmds.formLayout(_PROGRESS_FORM, edit=True,
+                    attachForm=[(_bar, "left", 24), (_bar, "right", 24),
+                                (_bar, "top", 7)])
     cmds.setParent("..")
     cmds.setParent("..")
     cmds.rowColumnLayout(numberOfColumns=2,
