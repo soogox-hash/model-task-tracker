@@ -45,7 +45,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.2.10"          # 用于确认当前加载的是哪份脚本
+VERSION = "1.2.11"          # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -1738,8 +1738,7 @@ def _check_selected(*_args):
         _restore_paint()
 
     all_inside = len(inside_any) == len(targets)
-    message = ("检查完成：%d/%d 个物体在画面内，画面外 %d 个（红），"
-               "被遮挡 %d 个（紫）"
+    message = ("检查完成 %d/%d 个物体在画面内，%d 个（红），%d 个（紫）"
                % (len(inside_any), len(targets), len(outside), len(blocked)))
     if unknown:
         message += "，无法判定 %d 个" % len(unknown)
