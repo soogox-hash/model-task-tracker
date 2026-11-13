@@ -44,7 +44,7 @@
 <body>
 <header>
   <span class="title">select_invisible.py</span>
-  <span class="meta">2205 行 · 80.9 KB · Maya 2020+ / Python 3</span>
+  <span class="meta">2223 行 · 81.2 KB · Maya 2020+ / Python 3</span>
   <span class="spacer"></span>
   <button id="copy">复制代码</button>
   <button id="download" class="ghost">下载 .py</button>
@@ -97,7 +97,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.1.6"           # 用于确认当前加载的是哪份脚本
+VERSION = "1.1.7"           # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -1785,8 +1785,32 @@ def _set_progress(percent, elapsed):
         cmds.text(_PROGRESS_TEXT, edit=True, label=label, visible=True)
         _trace("界面刷新 %d%%" % percent)
         cmds.refresh(force=True)
+        _fit_window()
     except Exception:
         pass  # 窗口被关闭时静默继续
+
+
+def _fit_window():
+    """把窗口高度收紧到内容实际需要的高度，去掉底部空白。"""
+    try:
+        from maya import OpenMayaUI as omui
+        from shiboken6 import wrapInstance
+        from PySide6 import QtWidgets
+    except Exception:
+        try:
+            from maya import OpenMayaUI as omui
+            from shiboken2 import wrapInstance
+            from PySide2 import QtWidgets
+        except Exception:
+            return
+    try:
+        pointer = omui.MQtUtil.findWindow(_WINDOW)
+        if not pointer:
+            return
+        window = wrapInstance(int(pointer), QtWidgets.QWidget)
+        window.adjustSize()
+    except Exception:
+        pass
 
 
 def _set_info(label, color=None):
@@ -1800,6 +1824,7 @@ def _set_info(label, color=None):
         cmds.refresh(force=True)
     except Exception:
         pass
+    _fit_window()
 
 
 def _set_label_color(name, color):
@@ -2164,7 +2189,7 @@ def show_ui(*_args):
         _stop_frame_follow()
         cmds.deleteUI(_WINDOW)
 
-    cmds.window(_WINDOW, title="不可见物体检测", width=380,
+    cmds.window(_WINDOW, title="镜头内物体检测", width=380,
                 resizeToFitChildren=True, sizeable=False,
                 closeCommand=_stop_frame_follow)
     cmds.columnLayout(adjustableColumn=True, rowSpacing=8,
@@ -2219,17 +2244,9 @@ def show_ui(*_args):
                   annotation="逐像素精确判定，需要 Maya GUI 会话")
     cmds.setParent("..")
     cmds.setParent("..")
-    # 进度条默认隐藏，但保留固定高度的容器，开始后出现时界面不跳动。
-    cmds.frameLayout(_PROGRESS_BOX, height=24, borderVisible=False,
-                     labelVisible=False, collapsable=False)
-    cmds.formLayout(_PROGRESS_FORM, height=20)
-    _bar = cmds.progressBar(_PROGRESS_BAR, minValue=0, maxValue=100,
-                            height=14, visible=False)
-    cmds.formLayout(_PROGRESS_FORM, edit=True,
-                    attachForm=[(_bar, "left", 24), (_bar, "right", 24),
-                                (_bar, "top", 3)])
-    cmds.setParent("..")
-    cmds.setParent("..")
+    # 进度条默认隐藏；直接放在主列里，隐藏时不占额外高度。
+    cmds.progressBar(_PROGRESS_BAR, minValue=0, maxValue=100,
+                     height=14, visible=False)
     cmds.rowColumnLayout(numberOfColumns=7,
                          columnWidth=[(1, 10), (2, 104), (3, 16),
                                       (4, 104), (5, 16), (6, 104), (7, 10)])
@@ -2250,10 +2267,11 @@ def show_ui(*_args):
     _refresh_cameras()
     _start_frame_follow()
     cmds.showWindow(_WINDOW)
+    _fit_window()
 
 
 if __name__ == "__main__":
-    print("不可见物体检测 v%s" % VERSION)
+    print("镜头内物体检测 v%s" % VERSION)
     show_ui()
 </code></pre>
 </main>
