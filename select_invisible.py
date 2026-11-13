@@ -45,7 +45,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.2.4"           # 用于确认当前加载的是哪份脚本
+VERSION = "1.2.5"           # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -2131,17 +2131,30 @@ def _ui_start(*_args):
         cmds.warning("帧范围无效：%s" % exc)
         return
 
-    info = ("镜头：%d 个\n模型：%d 个\n帧：%d 个（%g 至 %g）" %
-            (len(cam_shapes), len(targets), len(frames),
-             frames[0], frames[-1]))
-    _set_info(info)
-    print(info.replace("\n", "，"))
-
     if not cam_shapes:
         cmds.warning("场景里没有可用镜头")
         return
     if not targets:
         cmds.warning("场景里没有可判定的网格模型")
+        return
+
+    info = ("镜头：%d 个\n模型：%d 个\n帧：%d 个（%g 至 %g）" %
+            (len(cam_shapes), len(targets), len(frames),
+             frames[0], frames[-1]))
+    print(info.replace("\n", "，"))
+    # 统计信息用弹窗确认：写进底部消息行会变成多行，撑高窗口后
+    # 又被单行进度覆盖，窗口就会闪一下。消息行始终保持一行。
+    try:
+        choice = cmds.confirmDialog(
+            title="检测确认",
+            message=info,
+            button=["检测", "取消"],
+            defaultButton="检测",
+            cancelButton="取消",
+            dismissString="取消")
+    except Exception:
+        choice = "检测"
+    if choice != "检测":
         return
 
     if PIXEL_EXACT:
