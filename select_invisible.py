@@ -177,6 +177,8 @@ def _sample_frames(start=None, end=None, step=None, frames=None):
             raise ValueError("FRAMES 不能为空列表以外的空帧集合")
         return values
 
+    start = FRAME_START if start is None else start
+    end = FRAME_END if end is None else end
     start = (cmds.playbackOptions(query=True, minTime=True)
              if start is None else float(start))
     end = (cmds.playbackOptions(query=True, maxTime=True)
@@ -783,11 +785,16 @@ def _sample_targets(cam_shapes, frames, targets, progress=None):
     total_units = max(1, len(frames) * len(targets))
     started = time.time()
     for frame_index, frame in enumerate(frames):
+        _trace("帧 %s：设置时间" % frame)
         cmds.currentTime(frame)
         # 镜头位置和朝向必须在此帧重新求值，不能复用其他帧的矩阵。
+        _trace("帧 %s：计算镜头矩阵" % frame)
         frustums = [(cam, _cam_frustum(cam)) for cam in cam_shapes]
+        _trace("帧 %s：构建遮挡体" % frame)
         occluders = _build_occluders() if OCCLUSION else []
+        _trace("帧 %s：遮挡体 %d 个" % (frame, len(occluders)))
         occluder_index = _OccluderIndex(occluders) if OCCLUSION else None
+        _trace("帧 %s：遮挡索引完成" % frame)
         pending = [t for t in targets if t in remaining]
         base = frame_index * len(targets)
         _trace("帧 %s 开始，待判定 %d" % (frame, len(pending)))
@@ -1205,6 +1212,7 @@ def _set_progress(percent, elapsed):
     try:
         cmds.progressBar(_PROGRESS_BAR, edit=True, progress=percent)
         cmds.text(_PROGRESS_TEXT, edit=True, label=label)
+        _trace("界面刷新 %d%%" % percent)
         cmds.refresh(force=True)
     except Exception:
         pass  # 窗口被关闭时静默继续
