@@ -2,6 +2,11 @@
 """
 选出在指定镜头和帧范围内始终不可见的网格物体（Maya 2020+，Python 3）。
 
+用法
+----
+运行脚本打开检测面板，点击「开始」后才统计场景中的镜头、模型、帧数，
+并执行判定。也可以直接调用 select_invisible() 走脚本编辑器流程。
+
 选择规则
 --------
 * 选中镜头：只检查这些镜头；未选中镜头：检查场景镜头。
@@ -155,18 +160,20 @@ def _target_transforms(selection):
     return sorted(targets)
 
 
-def _sample_frames():
-    if FRAMES:
-        frames = sorted(set(float(f) for f in FRAMES))
-        if not frames:
+def _sample_frames(start=None, end=None, step=None, frames=None):
+    if frames is None:
+        frames = FRAMES
+    if frames:
+        values = sorted(set(float(f) for f in frames))
+        if not values:
             raise ValueError("FRAMES 不能为空列表以外的空帧集合")
-        return frames
+        return values
 
     start = (cmds.playbackOptions(query=True, minTime=True)
-             if FRAME_START is None else float(FRAME_START))
+             if start is None else float(start))
     end = (cmds.playbackOptions(query=True, maxTime=True)
-           if FRAME_END is None else float(FRAME_END))
-    step = float(FRAME_STEP)
+           if end is None else float(end))
+    step = float(FRAME_STEP if step is None else step)
     start, end = float(start), float(end)
     if step <= 0:
         raise ValueError("FRAME_STEP 必须大于 0")
@@ -867,9 +874,32 @@ def _notify(title, message):
         pass
 
 
-def select_invisible(*_args):
-    """主入口：选中在指定镜头、指定帧范围内始终不可见的物体。"""
+def _run_detection(cam_shapes, targets, frames):
+    """按已统计好的镜头、物体、帧执行判定，并恢复原始时间。"""
+    _validate_options(targets)
     original_time = cmds.currentTime(query=True)
+    try:
+        invisible = None
+        unresolved = []
+        if PIXEL_EXACT:
+            invisible = _pixel_exact_invisible(cam_shapes, frames, targets)
+            if invisible is not None:
+                print("视口 ID-Buffer 判定完成。")
+
+        if invisible is None:
+            invisible, unresolved = _sampling_invisible(
+                cam_shapes, frames, targets)
+        _report(invisible, unresolved)
+        return invisible
+    finally:
+        try:
+            cmds.currentTime(original_time)
+        except Exception:
+            pass
+
+
+def select_invisible(*_args):
+    """脚本编辑器入口：按当前选择和作用域直接判定。"""
     try:
         selection = cmds.ls(selection=True, long=True) or []
         cam_shapes = _cameras(selection)
@@ -886,29 +916,111 @@ def select_invisible(*_args):
                 "镜头 %d 个\n帧 %d 个（%g 至 %g）\n候选物体 %d 个" %
                 (len(cam_shapes), len(frames), frames[0], frames[-1],
                  len(targets)))
-
-        invisible = None
-        unresolved = []
-        if PIXEL_EXACT:
-            invisible = _pixel_exact_invisible(cam_shapes, frames, targets)
-            if invisible is not None:
-                print("视口 ID-Buffer 判定完成。")
-
-        if invisible is None:
-            invisible, unresolved = _sampling_invisible(
-                cam_shapes, frames, targets)
-        _report(invisible, unresolved)
-        return invisible
+        return _run_detection(cam_shapes, targets, frames)
     except Exception as exc:
         cmds.warning("不可见物体判定已中止：%s" % exc)
         return []
-    finally:
-        # 无论成功、失败、GUI 退回或用户异常，都恢复原始时间。
-        try:
-            cmds.currentTime(original_time)
-        except Exception:
-            pass
+
+
+# ---------------- 界面 ----------------
+_WINDOW = "invisibleObjectFinderWindow"
+_FIELD_START = "iofStartField"
+_FIELD_END = "iofEndField"
+_FIELD_STEP = "iofStepField"
+_CHECK_OCCLUSION = "iofOcclusionCheck"
+_CHECK_EXACT = "iofExactCheck"
+_CHECK_PIXEL = "iofPixelCheck"
+_INFO = "iofInfoText"
+
+
+def _frame_field(field):
+    text = (cmds.textFieldGrp(field, query=True, text=True) or "").strip()
+    return float(text) if text else None
+
+
+def _ui_start(*_args):
+    """点击开始后才扫描场景并执行判定。"""
+    global FRAME_START, FRAME_END, FRAME_STEP
+    global OCCLUSION, EXACT_FRUSTUM, PIXEL_EXACT
+    try:
+        FRAME_START = _frame_field(_FIELD_START)
+        FRAME_END = _frame_field(_FIELD_END)
+        FRAME_STEP = _frame_field(_FIELD_STEP)
+        if FRAME_STEP is None:
+            FRAME_STEP = 1.0
+    except ValueError:
+        cmds.warning("帧范围必须填写数字，留空表示使用播放范围")
+        return
+
+    OCCLUSION = cmds.checkBox(_CHECK_OCCLUSION, query=True, value=True)
+    EXACT_FRUSTUM = cmds.checkBox(_CHECK_EXACT, query=True, value=True)
+    PIXEL_EXACT = cmds.checkBox(_CHECK_PIXEL, query=True, value=True)
+
+    selection = cmds.ls(selection=True, long=True) or []
+    cam_shapes = _cameras(selection)
+    targets = _target_transforms(selection)
+    try:
+        frames = _sample_frames()
+    except Exception as exc:
+        cmds.text(_INFO, edit=True, label="帧范围无效：%s" % exc)
+        cmds.warning("帧范围无效：%s" % exc)
+        return
+
+    info = ("镜头：%d 个\n模型：%d 个\n帧：%d 个（%g 至 %g）" %
+            (len(cam_shapes), len(targets), len(frames),
+             frames[0], frames[-1]))
+    cmds.text(_INFO, edit=True, label=info)
+    cmds.refresh(force=True)
+    print(info.replace("\n", "，"))
+
+    if not cam_shapes:
+        cmds.warning("场景里没有可用镜头")
+        return
+    if not targets:
+        cmds.warning("场景里没有可判定的网格模型")
+        return
+
+    try:
+        return _run_detection(cam_shapes, targets, frames)
+    except Exception as exc:
+        cmds.warning("不可见物体判定已中止：%s" % exc)
+        return []
+
+
+def show_ui(*_args):
+    """打开检测面板；点击「开始」后才统计场景并运行。"""
+    if cmds.window(_WINDOW, exists=True):
+        cmds.deleteUI(_WINDOW)
+
+    cmds.window(_WINDOW, title="不可见物体检测", widthHeight=(380, 330),
+                sizeable=False)
+    cmds.columnLayout(adjustableColumn=True, rowSpacing=8,
+                      columnAttach=("both", 10))
+    cmds.text(label="未选镜头时检测场景全部镜头；未选物体时检测全部网格。",
+              align="left")
+    cmds.frameLayout(label="帧范围（留空 = 播放范围）", collapsable=False)
+    cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
+    cmds.textFieldGrp(_FIELD_START, label="起始帧", text="")
+    cmds.textFieldGrp(_FIELD_END, label="结束帧", text="")
+    cmds.textFieldGrp(_FIELD_STEP, label="帧步长", text="1")
+    cmds.setParent("..")
+    cmds.setParent("..")
+
+    cmds.checkBox(_CHECK_OCCLUSION, label="遮挡判定", value=OCCLUSION)
+    cmds.checkBox(_CHECK_EXACT, label="精确视锥裁剪", value=EXACT_FRUSTUM)
+    cmds.checkBox(_CHECK_PIXEL, label="视口 ID-Buffer（需 GUI）",
+                  value=PIXEL_EXACT)
+    cmds.text(_INFO, label="点击「开始」后统计场景数据", align="left")
+
+    cmds.rowColumnLayout(numberOfColumns=2,
+                         columnWidth=[(1, 168), (2, 168)],
+                         columnSpacing=[(1, 6)])
+    cmds.button(label="开始", height=32, command=_ui_start)
+    cmds.button(label="关闭", height=32,
+                command=lambda *_: cmds.deleteUI(_WINDOW))
+    cmds.setParent("..")
+    cmds.showWindow(_WINDOW)
 
 
 if __name__ == "__main__":
-    select_invisible()
+    show_ui()
