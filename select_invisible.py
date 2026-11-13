@@ -1094,6 +1094,8 @@ _INFO = "iofInfoText"
 _PROGRESS_BAR = "iofProgressBar"
 _PROGRESS_TEXT = "iofProgressText"
 _BUTTON_START = "iofStartButton"
+_CAMERA_LIST = "iofCameraList"
+_CAMERAS_CACHE = []
 
 
 def _format_seconds(seconds):
@@ -1146,6 +1148,43 @@ def _frame_field(field):
     return float(text) if text else None
 
 
+def _refresh_cameras(*_args):
+    """重新枚举场景镜头并默认全选。"""
+    global _CAMERAS_CACHE
+    _CAMERAS_CACHE = _cameras([])
+    labels = [_short(cam) for cam in _CAMERAS_CACHE]
+    cmds.textScrollList(_CAMERA_LIST, edit=True, removeAll=True)
+    if labels:
+        cmds.textScrollList(_CAMERA_LIST, edit=True, append=labels)
+        cmds.textScrollList(
+            _CAMERA_LIST, edit=True,
+            selectIndexedItem=list(range(1, len(labels) + 1)))
+    return _CAMERAS_CACHE
+
+
+def _select_all_cameras(*_args):
+    indices = list(range(1, len(_CAMERAS_CACHE) + 1))
+    if indices:
+        cmds.textScrollList(_CAMERA_LIST, edit=True,
+                            selectIndexedItem=indices)
+
+
+def _select_no_cameras(*_args):
+    cmds.textScrollList(_CAMERA_LIST, edit=True, deselectAll=True)
+
+
+def _chosen_cameras():
+    """面板里勾选的镜头；列表为空时退回视口选择/全部镜头。"""
+    listed = _CAMERAS_CACHE
+    if not listed:
+        return _cameras(cmds.ls(selection=True, long=True) or [])
+    indices = cmds.textScrollList(_CAMERA_LIST, query=True,
+                                  selectIndexedItem=True) or []
+    if not indices:
+        return None
+    return [listed[i - 1] for i in indices if 0 < i <= len(listed)]
+
+
 def _ui_start(*_args):
     """点击开始后才扫描场景并执行判定。"""
     global FRAME_START, FRAME_END, FRAME_STEP
@@ -1165,7 +1204,10 @@ def _ui_start(*_args):
     PIXEL_EXACT = cmds.checkBox(_CHECK_PIXEL, query=True, value=True)
 
     selection = cmds.ls(selection=True, long=True) or []
-    cam_shapes = _cameras(selection)
+    cam_shapes = _chosen_cameras()
+    if cam_shapes is None:
+        cmds.warning("请至少选择一个镜头（或点击「全选」）")
+        return
     targets = _target_transforms(selection)
     try:
         frames = _sample_frames()
@@ -1211,12 +1253,25 @@ def show_ui(*_args):
     if cmds.window(_WINDOW, exists=True):
         cmds.deleteUI(_WINDOW)
 
-    cmds.window(_WINDOW, title="不可见物体检测", widthHeight=(380, 390),
+    cmds.window(_WINDOW, title="不可见物体检测", widthHeight=(380, 560),
                 sizeable=False)
     cmds.columnLayout(adjustableColumn=True, rowSpacing=8,
                       columnAttach=("both", 10))
-    cmds.text(label="未选镜头时检测场景全部镜头；未选物体时检测全部网格。",
+    cmds.text(label="选择镜头后可只跑其中几个；帧范围对已选镜头生效。",
               align="left")
+    cmds.frameLayout(label="镜头（可多选）", collapsable=False)
+    cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
+    cmds.textScrollList(_CAMERA_LIST, numberOfRows=6, height=96,
+                        allowMultiSelection=True)
+    cmds.rowColumnLayout(numberOfColumns=3,
+                         columnWidth=[(1, 108), (2, 108), (3, 108)],
+                         columnSpacing=[(1, 5), (2, 5)])
+    cmds.button(label="全选", height=24, command=_select_all_cameras)
+    cmds.button(label="全不选", height=24, command=_select_no_cameras)
+    cmds.button(label="刷新", height=24, command=_refresh_cameras)
+    cmds.setParent("..")
+    cmds.setParent("..")
+    cmds.setParent("..")
     cmds.frameLayout(label="帧范围（留空 = 播放范围）", collapsable=False)
     cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
     cmds.textFieldGrp(_FIELD_START, label="起始帧", text="")
@@ -1241,6 +1296,7 @@ def show_ui(*_args):
     cmds.button(label="关闭", height=32,
                 command=lambda *_: cmds.deleteUI(_WINDOW))
     cmds.setParent("..")
+    _refresh_cameras()
     cmds.showWindow(_WINDOW)
 
 
