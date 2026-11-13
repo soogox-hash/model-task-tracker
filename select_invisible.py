@@ -45,7 +45,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.2.6"           # 用于确认当前加载的是哪份脚本
+VERSION = "1.2.7"           # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -75,6 +75,7 @@ _MATERIALS = {
     "purple": ("invisible_check_purple", (0.62, 0.13, 0.87)),
 }
 _RED_STATE = "invisibleCheckState"           # 记录原材质，供下次检测恢复
+_ORIG_ATTR = "invisibleCheckOrig"            # 形状上的原材质记录（兜底还原）
 _DEFAULT_CAMERAS = ("perspShape", "frontShape", "sideShape", "topShape")
 _DRAW_TYPES = ("mesh", "nurbsSurface", "subdiv", "gpuCache")
 _DRAW_ATTRS = (
@@ -1393,11 +1394,44 @@ def _store_paint_state(mapping):
     cmds.setAttr(_RED_STATE + ".restore", json.dumps(mapping), type="string")
 
 
+def _mark_groups():
+    """返回两个标记材质当前连接的 shadingGroup（名称可能不是默认的）。"""
+    groups = []
+    for key in _MATERIALS:
+        material = _MATERIALS[key][0]
+        if not cmds.objExists(material):
+            continue
+        groups.extend(cmds.listConnections(material, type="shadingEngine")
+                      or [])
+    return list(dict.fromkeys(groups))
+
+
+def _write_original(shape, groups):
+    """把标色前的 shadingGroup 记在形状上，状态节点丢失也能还原。"""
+    plug = shape + "." + _ORIG_ATTR
+    try:
+        if not cmds.objExists(plug):
+            cmds.addAttr(shape, longName=_ORIG_ATTR, dataType="string")
+        cmds.setAttr(plug, json.dumps(groups), type="string")
+    except Exception:
+        pass
+
+
+def _read_original(shape):
+    plug = shape + "." + _ORIG_ATTR
+    if not cmds.objExists(plug):
+        return None
+    try:
+        raw = cmds.getAttr(plug)
+        return json.loads(raw) if raw else None
+    except Exception:
+        return None
+
+
 def _restore_paint():
     """还原上次标色前的材质指定，保证每次检测只反映当前结果。"""
     mapping = _paint_state()
-    if not mapping:
-        return
+    restored = 0
     for shape, groups in mapping.items():
         if not cmds.objExists(shape):
             continue
@@ -1406,13 +1440,33 @@ def _restore_paint():
                 continue
             try:
                 cmds.sets(shape, edit=True, forceElement=group)
+                restored += 1
             except Exception:
                 pass
-    _store_paint_state({})
+    # 兜底扫描：状态节点丢失或旧版本遗留的标色，按形状上记录的原材质
+    # 还原；连记录都没有的退回默认材质，避免一直挂着紫色/红色。
+    for group in _mark_groups():
+        for shape in cmds.sets(group, query=True) or []:
+            if shape in mapping:
+                continue
+            originals = _read_original(shape) or ["initialShadingGroup"]
+            for old in originals:
+                if cmds.objExists(old):
+                    try:
+                        cmds.sets(shape, edit=True, forceElement=old)
+                        restored += 1
+                    except Exception:
+                        pass
+                    break
+    if mapping:
+        _store_paint_state({})
+    if restored:
+        print("已还原上次标色 %d 个物体。" % restored)
 
 
 def _paint(batches):
     """按类别把物体指定到各自共享材质；返回 {类别: shadingGroup}。"""
+    _restore_paint()  # 先还原上次标色，避免本次结果与上次叠加
     shapes_by_key = {}
     for key, targets in batches.items():
         shapes = []
@@ -1426,7 +1480,6 @@ def _paint(batches):
             shapes_by_key[key] = shapes
     if not shapes_by_key:
         return {}
-    _restore_paint()
     mapping = {}
     groups = {}
     for key, shapes in shapes_by_key.items():
@@ -1434,6 +1487,7 @@ def _paint(batches):
         groups[key] = group
         for shape in shapes:
             mapping[shape] = _shape_shading_groups(shape)
+            _write_original(shape, mapping[shape])
             try:
                 cmds.sets(shape, edit=True, forceElement=group)
             except Exception:
