@@ -44,7 +44,7 @@
 <body>
 <header>
   <span class="title">select_invisible.py</span>
-  <span class="meta">2173 行 · 79.7 KB · Maya 2020+ / Python 3</span>
+  <span class="meta">2205 行 · 80.9 KB · Maya 2020+ / Python 3</span>
   <span class="spacer"></span>
   <button id="copy">复制代码</button>
   <button id="download" class="ghost">下载 .py</button>
@@ -97,7 +97,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.1.5"           # 用于确认当前加载的是哪份脚本
+VERSION = "1.1.6"           # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -1535,10 +1535,23 @@ def _notify(title, message):
         pass
 
 
-def _frame_span(frames):
-    if not frames:
+def _frame_text(frames, limit=6):
+    """帧列表的紧凑写法：单帧、连续区间、或列举。"""
+    values = sorted(set(frames))
+    if not values:
         return ""
-    return "，%g 至 %g 帧" % (frames[0], frames[-1])
+    if len(values) == 1:
+        return "%g" % values[0]
+    step = values[1] - values[0]
+    contiguous = all(abs((b - a) - step) &lt; 1e-6
+                     for a, b in zip(values, values[1:]))
+    if contiguous:
+        return "%g 至 %g" % (values[0], values[-1])
+    head = values[:limit]
+    text = "、".join("%g" % v for v in head)
+    if len(values) &gt; limit:
+        text += " 等"
+    return text
 
 
 def _check_selected(*_args):
@@ -1613,38 +1626,57 @@ def _check_selected(*_args):
             pass
 
     lines = []
-    inside_count = 0
+    inside_any = set()
+    clear_any = set()
+    total = len(frames)
     for target in targets:
         lines.append("物体 %s" % target)
-        inside_any = False
         for cam in cam_shapes:
             data = stats[target][cam]
             name = labels[cam]
             edge = data.get("edge")
-            edge_text = ("（采样点 u=%.2f, v=%.2f）" % edge) if edge else ""
+            edge_text = ("，采样点 u=%.2f, v=%.2f" % edge) if edge else ""
             if data["clear"]:
-                inside_any = True
-                lines.append("  %s：画面内，未被遮挡 %d/%d 帧%s%s" %
-                             (name, len(data["clear"]), len(frames),
-                              _frame_span(data["clear"]), edge_text))
+                inside_any.add(target)
+                clear_any.add(target)
+                lines.append(
+                    "  %s：画面内且未被遮挡 %d 帧（共采样 %d 帧，帧 %s）%s" %
+                    (name, len(data["clear"]), total,
+                     _frame_text(data["clear"]), edge_text))
             elif data["inside"]:
-                inside_any = True
-                lines.append("  %s：画面内，但全部被遮挡 %d/%d 帧%s" %
-                             (name, len(data["inside"]), len(frames),
-                              edge_text))
+                inside_any.add(target)
+                lines.append(
+                    "  %s：画面内但全部被遮挡（共采样 %d 帧，帧 %s）%s" %
+                    (name, total, _frame_text(data["inside"]), edge_text))
             else:
-                lines.append("  %s：不在画面内（%d 帧）" %
-                             (name, len(frames)))
+                lines.append("  %s：不在画面内（共采样 %d 帧）" %
+                             (name, total))
         if target in unknown:
             lines.append("  注意：%s" % unknown[target])
-        if inside_any:
-            inside_count += 1
     report = "\n".join(lines)
     print(report)
-    all_inside = inside_count == len(targets)
-    _set_info("检查完成：%d/%d 个物体在所选镜头的画面内，详见脚本编辑器"
-              % (inside_count, len(targets)),
-              color="#1a7f37" if all_inside else "#d1242f")
+
+    # 标色：完全在画面外 → 红；进入画面但所有帧都被挡 → 紫。
+    outside = [t for t in targets if t not in inside_any and t not in unknown]
+    blocked = [t for t in targets
+               if t in inside_any and t not in clear_any and t not in unknown]
+    batches = {}
+    if outside:
+        batches["red"] = outside
+    if blocked:
+        batches["purple"] = blocked
+    if batches:
+        _paint(batches)
+    else:
+        _restore_paint()
+
+    all_inside = len(inside_any) == len(targets)
+    message = ("检查完成：%d/%d 个物体在画面内，画面外 %d 个（红），"
+               "被遮挡 %d 个（紫）"
+               % (len(inside_any), len(targets), len(outside), len(blocked)))
+    if unknown:
+        message += "，无法判定 %d 个" % len(unknown)
+    _set_info(message, color="#1a7f37" if all_inside else "#d1242f")
     return report
 
 
