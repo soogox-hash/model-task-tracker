@@ -45,7 +45,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.2.5"           # 用于确认当前加载的是哪份脚本
+VERSION = "1.2.6"           # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -331,7 +331,9 @@ def _cam_frustum(cam_shape, margin=None):
         half_h = half_w / aspect
     else:
         half_w, half_h = _perspective_extents(fn, aspect)
-    scale = (MARGIN if margin is None else margin) * float(fn.overscan)
+    # 只按相机门框（film gate）判定，不乘 overscan：视口里门框外的
+    # 区域不算“画面内”，否则画面外的物体会被误判成被遮挡（标紫）。
+    scale = (MARGIN if margin is None else margin)
     half_w *= scale
     half_h *= scale
     if half_w <= 0 or half_h <= 0:
@@ -962,6 +964,7 @@ def _sampling_invisible(cam_shapes, frames, targets, progress=None):
 def _sample_targets(cam_shapes, frames, targets, progress=None):
     remaining = set(targets)
     in_frame = set()
+    detail = {}  # 物体首次进入画面时的镜头/帧/屏幕坐标，供日志核对
     unresolved = []
     skipped = []
     unconfirmed = []
@@ -1010,6 +1013,12 @@ def _sample_targets(cam_shapes, frames, targets, progress=None):
                         continue
                     # 进入过画面：即使被完全遮挡，也属于“被遮挡”而不是“画面外”。
                     in_frame.add(target)
+                    if target not in detail and evidence:
+                        sx, sy = _screen_ratio(evidence[0], frustum)
+                        detail[target] = ("镜头 %s 帧 %g（屏幕坐标 %.2f, %.2f，"
+                                          "1.0 = 画面边缘）"
+                                          % (_short(frustum["name"]), frame,
+                                             sx, sy))
                     if not OCCLUSION:
                         visible = True
                         if DEBUG_VISIBLE:
@@ -1063,7 +1072,7 @@ def _sample_targets(cam_shapes, frames, targets, progress=None):
         _trace("三角预算不足保留 %d 个" % len(unconfirmed))
     invisible = [t for t in targets if t in remaining]
     occluded = [t for t in invisible if t in in_frame]
-    return invisible, unresolved, occluded
+    return invisible, unresolved, occluded, detail
 
 
 def _frustum_only_inside(cam_shapes, frames, targets):
@@ -1433,7 +1442,8 @@ def _paint(batches):
     return groups
 
 
-def _report(invisible, unresolved, occluded=()):
+def _report(invisible, unresolved, occluded=(), detail=None):
+    detail = detail or {}
     for target, reason in unresolved:
         print("无法判定（未标色）：%s\n    %s" % (target, reason))
     if invisible:
@@ -1456,7 +1466,9 @@ def _report(invisible, unresolved, occluded=()):
             print("  画面内但完全被遮挡 %d 个（紫色 %s）：" %
                   (len(blocked), groups.get("purple", "")))
             for target in blocked:
-                print("     ", target)
+                hit = detail.get(target)
+                print("     ", target if not hit else
+                      "%s  ← %s" % (target, hit))
         try:
             cmds.inViewMessage(
                 amg="<hl>%d</hl> 个物体不可见：画面外 %d（红），"
@@ -1645,6 +1657,16 @@ def _run_detection(cam_shapes, targets, frames, progress=None):
         invisible = None
         unresolved = []
         occluded = []
+        detail = {}
+        for cam in cam_shapes:
+            frustum = _cam_frustum(cam)
+            print("视锥：%s 水平 %.1f° 垂直 %.1f°（渲染 %d×%d，像素比 %.2f）"
+                  % (_short(cam),
+                     math.degrees(2 * math.atan(frustum["right"])),
+                     math.degrees(2 * math.atan(frustum["top"])),
+                     int(cmds.getAttr("defaultResolution.width")),
+                     int(cmds.getAttr("defaultResolution.height")),
+                     float(cmds.getAttr("defaultResolution.pixelAspect"))))
         if PIXEL_EXACT:
             invisible = _pixel_exact_invisible(cam_shapes, frames, targets)
             if invisible is not None:
@@ -1655,11 +1677,11 @@ def _run_detection(cam_shapes, targets, frames, progress=None):
         if invisible is None:
             if OCCLUSION:
                 _occluder_report()
-            invisible, unresolved, occluded = _sampling_invisible(
+            invisible, unresolved, occluded, detail = _sampling_invisible(
                 cam_shapes, frames, targets, progress)
         elif progress is not None:
             progress(100, 1, 1, 0.0)
-        _report(invisible, unresolved, occluded)
+        _report(invisible, unresolved, occluded, detail)
         return invisible, occluded
     finally:
         try:
