@@ -45,7 +45,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.2.9"           # 用于确认当前加载的是哪份脚本
+VERSION = "1.2.10"          # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -909,8 +909,8 @@ def _ray_blocked(source, destination, index, skip_transform):
         hit_distance = _hit_distance(hit, source)
         if (hit_distance is not None and RAY_EPSILON < hit_distance
                 < distance - RAY_EPSILON):
-            return True
-    return False
+            return _short(transform)  # 返回挡住它的物体，便于核对
+    return None
 
 
 def _ray_source(point, frustum):
@@ -1020,12 +1020,6 @@ def _sample_targets(cam_shapes, frames, targets, progress=None):
                         continue
                     # 进入过画面：即使被完全遮挡，也属于“被遮挡”而不是“画面外”。
                     in_frame.add(target)
-                    if target not in detail and evidence:
-                        sx, sy = _screen_ratio(evidence[0], frustum)
-                        detail[target] = ("镜头 %s 帧 %g（屏幕坐标 %.2f, %.2f，"
-                                          "1.0 = 画面边缘）"
-                                          % (_short(frustum["name"]), frame,
-                                             sx, sy))
                     if not OCCLUSION:
                         visible = True
                         if DEBUG_VISIBLE:
@@ -1033,15 +1027,27 @@ def _sample_targets(cam_shapes, frames, targets, progress=None):
                                            evidence[0])
                         break
                     points = _occlusion_points(geometry, frustum, evidence)
-                    hit = next(
-                        (p for p in points
-                         if not _ray_blocked(_ray_source(p, frustum), p,
-                                             occluder_index, target)), None)
+                    hit = None
+                    blocker = None
+                    for p in points:
+                        blocked_by = _ray_blocked(
+                            _ray_source(p, frustum), p, occluder_index, target)
+                        if blocked_by is None:
+                            hit = p
+                            break
+                        if blocker is None:
+                            blocker = blocked_by
                     if hit is not None:
                         visible = True
                         if DEBUG_VISIBLE:
                             _debug_visible(target, frame, frustum, hit)
                         break
+                    if blocker and target not in detail:
+                        sx, sy = _screen_ratio(evidence[0], frustum)
+                        detail[target] = (
+                            "镜头 %s 帧 %g（屏幕坐标 %.2f, %.2f），被 %s 遮挡"
+                            % (_short(frustum["name"]), frame, sx, sy,
+                               blocker))
                 if uncertain_target:
                     remaining.discard(target)
                     unconfirmed.append(target)
