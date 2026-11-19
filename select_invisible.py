@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-选出在指定镜头和帧范围内始终不可见的网格物体（Maya 2020+，Python 3）。
+镜头可见性检测 Shot Visibility Checker（Maya 2020+，Python 3）。
+
+选出在指定镜头和帧范围内始终不可见的网格物体。
 
 用法
 ----
@@ -45,7 +47,7 @@ import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
 # ---------------- 可调参数 ----------------
-VERSION = "1.2.13"          # 用于确认当前加载的是哪份脚本
+VERSION = "1.2.14"          # 用于确认当前加载的是哪份脚本
 MARGIN = 1.0                # 视锥放宽系数；1.0 = 严格按画面边界
 FRAMES = []                 # 显式帧列表，优先级最高；支持子帧
 FRAME_START = None          # 帧范围起点；None = 当前帧
@@ -2393,7 +2395,8 @@ def show_ui(*_args):
     except Exception:
         pass
 
-    cmds.window(_WINDOW, title="镜头内物体检测 v%s" % VERSION, width=380,
+    cmds.window(_WINDOW, title="镜头可见性检测 Shot Visibility Checker v%s"
+                % VERSION, width=380,
                 resizeToFitChildren=True, sizeable=False,
                 closeCommand=_stop_frame_follow)
     cmds.columnLayout(adjustableColumn=True, rowSpacing=8,
@@ -2476,5 +2479,5 @@ def show_ui(*_args):
 
 
 if __name__ == "__main__":
-    print("镜头内物体检测 v%s" % VERSION)
+    print("镜头可见性检测 Shot Visibility Checker v%s" % VERSION)
     show_ui()
